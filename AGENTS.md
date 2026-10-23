@@ -179,11 +179,10 @@ do not treat broad C++ catch as pointer validation.
 ## Network configuration and distinct request paths
 
 The INI mirrors `2025patch.ini` from recflare/patch-2025: one `[config]` section,
-with `ApiHost`, `EnableTracing` and `VoiceKeyXml` keeping their 2025 names and
+with `ApiHost`, `SuppressDuidMismatch`, `EnableTracing` and `VoiceKeyXml` keeping their 2025 names and
 meaning and flags spelled true/false (1/0, yes/no, on/off also parse). Settings
 without a 2025 counterpart keep their 2026 names in the same section. 2025-only
-keys (`PhotonHost`, `PhotonPort`, `EnableConsole`, `BlockDeadHosts`,
-`SuppressDuidMismatch`) are ignored: this client's room transport is Tachyon and
+keys (`PhotonHost`, `PhotonPort`, `EnableConsole`, `BlockDeadHosts`) are ignored: this client's room transport is Tachyon and
 its endpoint comes from matchmaking, so the Photon keys have no target. Unlike 2025, invalid values fail
 startup instead of falling back, a missing file is not regenerated and the file
 is DLL-relative. The earlier `[Network]`/`[ScreenShare]`/`[Logging]` layout is
@@ -304,7 +303,24 @@ screen-share bulk serialization fixes stay active. Build/install preflight does
 not establish live screen-share behavior.
 
 The measured module-scan callback `0x203C270` only performs fatal exit 533223478 and
-is replaced. Other FatalApplicationQuit reasons and ordinary exits remain native.
+is replaced.
+
+`SuppressDuidMismatch` (default true, as in 2025; absent also means true) hooks
+CheatManager.CheckForDUIDMismatch `0x202CC40` only when enabled. The 2026 map
+from the live 20260323.14 capture names it there and matches every verified RVA
+in Methods.h. Metadata (Il2CppType byref at bit 29, validated on Int32.TryParse
+and Dictionary.TryGetValue) gives instance `bool(out string mismatchedDUID, out
+string actualDUID)`, unlike 2025's single out-param. Its entry is prologue-stolen
+(`nop; jmp` to a thunk outside the module), the same shape as the already-hooked
+HTTP SendRequest/Uri entries. No direct rel32 callers exist in the carved image.
+The hook calls the original under SEH for one logged outcome, clears both outs and
+returns false; it does not log device IDs. This is a workaround for the 2025-
+documented migration hang, not a repair of the stored ID.
+Added 2026-10-22: format/package build passed, a Config::Load harness read the
+flag as true for the template, the 2025 template and an absent key, false for
+false/off, and rejected other text; --check-config verified against the
+recflare-2026 client. The hook has not run in a live client yet: confirm a
+`[DUID]` log line and launch/Create Account on an affected machine. Other FatalApplicationQuit reasons and ordinary exits remain native.
 Native-fault observation records evidence without swallowing faults or changing
 Referee control flow. Do not broadly suppress errors to conceal a backend failure.
 

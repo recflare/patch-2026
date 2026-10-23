@@ -38,8 +38,8 @@ Replace these example values with your operator's details. Keep the remaining
 settings of the supplied INI and set `VoiceKeyXml` if your operator requires it.
 
 All settings live in one `[config]` section, as in `2025patch.ini`. `ApiHost`,
-`EnableTracing` and `VoiceKeyXml` keep their 2025 names and meaning, so those
-lines can be copied across; other 2025 settings are ignored by this patch. An
+`SuppressDuidMismatch`, `EnableTracing` and `VoiceKeyXml` keep their 2025 names
+and meaning, so those lines can be copied across; other 2025 settings are ignored by this patch. An
 INI from an earlier 2026 release (`[Network]`, `[ScreenShare]`, `[Logging]`) is
 rejected: move its settings under `[config]`, renaming `ServerUrl` to `ApiHost`
 and `Verbose` to `EnableTracing`. On/off settings accept `true`/`false` or `1`/`0`.
@@ -53,6 +53,7 @@ and `Verbose` to `EnableTracing`. On/off settings accept `true`/`false` or `1`/`
 | `DisableCertificatePinning` | `true` enables certificate compatibility for your configured service domain and its subdomains. Use `false` to keep original checks. |
 | `AllowUnsignedImages` | `true` accepts images without the original service's signature. This applies to all images checked by the patch. Use `false` to keep original checks. |
 | `FramesPerSecond` | `0` keeps original screen-sharing presets. Set 1-60 for a target rate; the delivered rate can be lower. Higher rates use more bandwidth. |
+| `SuppressDuidMismatch` | `true` (default) fixes the launch / Create Account hang on a machine whose stored device ID no longer matches. It changes nothing on other machines. Set `false` only if your operator asks. |
 | `EnableTracing` | `false` keeps routine diagnostics off. Set `true` temporarily when troubleshooting. |
 
 ## Troubleshooting

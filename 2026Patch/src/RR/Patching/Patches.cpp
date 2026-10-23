@@ -28,6 +28,7 @@ namespace RR::Patches {
     static unsigned gateCount = 0;
     static void (*removeCircuitFunctionOriginal)(void*, int32_t, void*) = nullptr;
     static RR::Config::Network networkConfig;
+    static bool suppressDuidMismatch = true;
     static void* Gate(void* source) {
         // These zero-filled executable bytes were verified in the runtime Unity image.
         // Each 32-byte slot calls one GameAssembly target with Windows x64 shadow
@@ -750,6 +751,38 @@ namespace RR::Patches {
             Log("[Exit] patch module-scan exit suppressed (533223478)");
         }
     }
+    // Ported from recflare/patch-2025's SuppressDuidMismatch. When the stored
+    // device ID differs from the runtime one, a true result sends the client
+    // down a PlayerReporting/v1/deviceId migration that hangs launch / Create
+    // Account against archival servers. Forcing false skips it; matching machines
+    // already return false. This is a workaround and does not repair the stored ID.
+    // Metadata gives bool(self, String** mismatched, String** actual, MethodInfo*):
+    // four register arguments, so the MinHook trampoline is called directly. The
+    // original runs once per call for the logged outcome (the 2025 analysis found
+    // it only compares; the hang is in the caller), under SEH because its entry is
+    // a relocated stolen-prologue jump. Out-params are cleared, as in 2025; null
+    // stores need no write barrier. Device IDs are identifiers and are not logged.
+    static bool (*duidMismatchOriginal)(void*, void**, void**, void*) = nullptr;
+    static bool DuidMismatch(void* instance, void** mismatched, void** actual, void* method) {
+        bool original = false;
+        __try {
+            original = duidMismatchOriginal(instance, mismatched, actual, method);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            original = false;
+        }
+        static LONG logged = 0, loggedMismatch = 0;
+        if (InterlockedCompareExchange(&logged, 1, 0) == 0 ||
+            (original && InterlockedCompareExchange(&loggedMismatch, 1, 0) == 0)) {
+            Log("[DUID] CheatManager.CheckForDUIDMismatch original=%d; forcing false", original);
+        }
+        if (mismatched) {
+            *mismatched = nullptr;
+        }
+        if (actual) {
+            *actual = nullptr;
+        }
+        return false;
+    }
     static void* Send(void* request, void* method) {
         // Preserve the client's Uri type and constructor semantics. Replacing
         // the managed reference also requires IL2CPP's write barrier; a raw field
@@ -866,6 +899,7 @@ namespace RR::Patches {
         networkConfig = settings.network;
         tachyonPublicKey = settings.voiceKeyXml;
         screenShareFps = settings.framesPerSecond;
+        suppressDuidMismatch = settings.suppressDuidMismatch;
         game = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"GameAssembly.dll"));
         unity = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"UnityPlayer.dll"));
         if (!game || !unity) {
@@ -1002,6 +1036,9 @@ namespace RR::Patches {
                   "SessionManager.FatalApplicationQuit.Diagnostic") ||
             !Hook(RR::Methods::Session::ModuleScanDetected, reinterpret_cast<void*>(ModuleScanDetected),
                   nullptr, "CheatManager.ModuleScanDetected") ||
+            (suppressDuidMismatch &&
+             !Hook(RR::Methods::Session::CheckForDUIDMismatch, reinterpret_cast<void*>(DuidMismatch),
+                   reinterpret_cast<void**>(&duidMismatchOriginal), "CheatManager.CheckForDUIDMismatch")) ||
             !Hook(RR::Methods::Circuits::RemoveFunction, reinterpret_cast<void*>(RemoveCircuitFunction),
                   reinterpret_cast<void**>(&removeCircuitFunctionOriginal),
                   "CircuitsV2.RemoveFunction.Lifecycle")) {

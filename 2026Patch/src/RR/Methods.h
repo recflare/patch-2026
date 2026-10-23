@@ -107,6 +107,11 @@ namespace RR::Methods::Tachyon {
 namespace RR::Methods::Session {
     inline constexpr uintptr_t FatalQuit = 0x2056EE0;
     inline constexpr uintptr_t ModuleScanDetected = 0x203C270;
+    // CheatManager.CheckForDUIDMismatch(out string mismatchedDUID, out string
+    // actualDUID) -> bool, an instance method on this build (2025 had one out).
+    // The entry is prologue-stolen like HTTP::SendRequest: the live image reads
+    // `nop; jmp <thunk outside the module>` and the on-disk bytes are filler.
+    inline constexpr uintptr_t CheckForDUIDMismatch = 0x202CC40;
 }
 
 namespace RR::Methods::Circuits {

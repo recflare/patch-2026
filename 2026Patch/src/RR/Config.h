@@ -8,11 +8,14 @@ namespace RR::Config {
     // One snapshot feeds both preflight and the DLL. Runtime callbacks copy the
     // values they need; there is no live INI reload while hooks are executing.
     // Zero FPS and false flags are native-behavior defaults when options are absent.
+    // SuppressDuidMismatch keeps the 2025 patch's default of true: it changes
+    // nothing on machines whose stored device ID already matches.
     struct Settings {
         Network network;
         std::string voiceKeyXml;
         int framesPerSecond = 0;
         bool verbose = false;
+        bool suppressDuidMismatch = true;
     };
 
     // Win32 INI reads return the fallback for an absent field. Empty routing
@@ -84,8 +87,11 @@ namespace RR::Config {
         }
         if (!ReadFlag(path, L"DisableCertificatePinning", settings.network.disableCertificatePinning) ||
             !ReadFlag(path, L"AllowUnsignedImages", settings.network.allowUnsignedImages) ||
-            !ReadFlag(path, L"EnableTracing", settings.verbose)) {
-            error = "DisableCertificatePinning, AllowUnsignedImages and EnableTracing must be true or false.";
+            !ReadFlag(path, L"EnableTracing", settings.verbose) ||
+            !ReadFlag(path, L"SuppressDuidMismatch", settings.suppressDuidMismatch)) {
+            error = "DisableCertificatePinning, AllowUnsignedImages, EnableTracing and SuppressDuidMismatch "
+                    "must be "
+                    "true or false.";
             return false;
         }
         settings.framesPerSecond =
