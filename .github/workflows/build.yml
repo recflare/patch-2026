@@ -18,15 +18,24 @@ jobs:
       - name: Check C++ formatting
         shell: pwsh
         run: .\format.ps1 -Check
+      # build.cmd -Package stages the INI template and both launchers beside the
+      # binaries and rejects private RSA fields, so CI and a local build produce
+      # the same drop-in set. Upload the five files flat, by explicit allowlist,
+      # so the downloaded artifact is itself the drop-in set.
       - name: Build and package
         shell: pwsh
         run: .\build.cmd -Package
-      - name: Upload drop-in ZIP
+      - name: Upload drop-in files
         uses: actions/upload-artifact@v4
         with:
-          name: Patch26Dist-x64
+          name: 2026Patch-x64
           if-no-files-found: error
-          path: x64/Release/Patch26Dist.zip
+          path: |
+            x64/Release/2026patch.dll
+            x64/Release/Injector.exe
+            x64/Release/2026patch.ini
+            x64/Release/RecRoomScreen.bat
+            x64/Release/RecRoomVR.bat
 
   release:
     name: Release
@@ -36,15 +45,22 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download drop-in ZIP
+      - name: Download drop-in files
         uses: actions/download-artifact@v4
         with:
-          name: Patch26Dist-x64
+          name: 2026Patch-x64
           path: dist
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\2026patch.dll, dist\Injector.exe, dist\2026patch.ini, `
+            dist\RecRoomScreen.bat, dist\RecRoomVR.bat `
+            -DestinationPath "2026Patch-$env:GITHUB_REF_NAME-x64.zip"
       - name: Create release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME dist/Patch26Dist.zip `
+          gh release create $env:GITHUB_REF_NAME `
+            "2026Patch-$env:GITHUB_REF_NAME-x64.zip" `
             --repo $env:GITHUB_REPOSITORY --generate-notes

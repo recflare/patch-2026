@@ -64,8 +64,11 @@ Manual launch is also supported: start Injector.exe first, keep it running and
 then start RecRoom.exe from the same installation. User-facing prompts must cover
 this path as well as the automatic batch launchers.
 
-CI checks formatting and builds/packages the native binaries. Releases run only
-for `v*` tags. Research/test sources are excluded from this source snapshot.
+CI checks formatting and builds/packages the native binaries, then uploads the
+five drop-in files flat as artifact `2026Patch-x64`. Releases run only for `v*`
+tags: as in recflare/patch-2025, the release job zips those five files by explicit
+list into `2026Patch-<tag>-x64.zip` and publishes it with generated notes. Local
+`Patch26Dist.zip` has the same contents; keep both allowlists identical. Research/test sources are excluded from this source snapshot.
 Earlier automated checks recorded below are completed validation, not the current
 CI suite. Keep local investigation tooling outside the published tree.
 
@@ -179,9 +182,21 @@ do not treat broad C++ catch as pointer validation.
 
 ## Network configuration and distinct request paths
 
+The INI mirrors `2025patch.ini` from recflare/patch-2025: one `[config]` section,
+with `ApiHost`, `SuppressDuidMismatch`, `EnableTracing` and `VoiceKeyXml` keeping their 2025 names and
+meaning and flags spelled true/false (1/0, yes/no, on/off also parse). Settings
+without a 2025 counterpart keep their 2026 names in the same section. 2025-only
+keys (`PhotonHost`, `PhotonPort`, `EnableConsole`, `BlockDeadHosts`) are ignored: this client's room transport is Tachyon and
+its endpoint comes from matchmaking, so the Photon keys have no target. Unlike 2025, invalid values fail
+startup instead of falling back, a missing file is not regenerated and the file
+is DLL-relative. The earlier `[Network]`/`[ScreenShare]`/`[Logging]` layout is
+rejected with a migration message, since it would otherwise apply nothing.
+
 The INI beside the DLL must exist; routing fields can independently be missing or
-blank. `ServerUrl` redirects the stock HTTP discovery origin `ns.rec.net`, preserving
-its suffix. Discovery supplies other service endpoints. `ServerDomain` scopes
+blank. `ApiHost` redirects the stock HTTP discovery origin `ns.rec.net`, preserving
+its suffix. A bare host[:port] replaces only the authority and keeps the request's
+scheme, as the 2025 patch does; a full http(s) origin replaces the scheme too.
+Discovery supplies other service endpoints. `ServerDomain` scopes
 domain-based overrides: equality or a dot-separated subdomain is required, excluding
 lookalike suffixes. An empty domain grants no scope. Do not turn protocol identifiers
 such as stock discovery hosts or API routes into operator defaults.
@@ -198,24 +213,27 @@ verifier receives bytes, not a URL, so `AllowUnsignedImages` is global; do not c
 domain restrictions. Both flags can retain original checks. Paths, query strings
 and headers may contain account data and must not be logged.
 
-`TachyonHost` accepts hostname/IPv4 plus port 1-65535. The measured transport calls
-IPAddress.Parse; resolve hostnames to IPv4 before room entry. IPv6 overrides are
-unsupported. Blank transport ID keeps matchmaking's server ID. Remote overrides
-require RSA public XML with only Modulus/Exponent; loopback may retain the client's
-key. Private RSA fields belong on the server and are rejected even when other
-transport settings are absent.
-Public-key replacement is independent of the address override: a configured key
-with blank `TachyonHost` preserves matchmaking's endpoint and server ID. This path
-is under local development testing; prior release validation does not cover it.
+The room transport endpoint and server ID always come from matchmaking. The
+`TachyonHost`/`TachyonServerId` overrides, their `PATCH26_TACHYON_ENDPOINT`
+environment override, startup IPv4 resolution and the ConnectRoom MoveNext hook
+(`0x9AA42B0`) were removed on 2026-10-12 at the maintainer's request as unneeded;
+leftover keys in an INI are ignored. `VoiceKeyXml` replaces only the Tachyon RSA
+public key and accepts XML with only Modulus/Exponent. Private RSA fields belong
+on the server and are rejected. A configured key also installs the
+connected/disconnected/failure observers. Key replacement with matchmaking's
+endpoint is under local development testing; prior release validation does not
+cover it.
 
-Environment overrides `PATCH26_TACHYON_ENDPOINT` and `PATCH26_TACHYON_PUBLIC_KEY`
-follow the INI. Any local tooling that sets them must pass the same environment
-to injector/client and restore the caller's values on failure. The shipped launchers
-use the INI. Do not log the public-key file or contents.
+Environment override `PATCH26_TACHYON_PUBLIC_KEY` follows the INI. Any local
+tooling that sets it must pass the same environment to injector/client and restore
+the caller's value on failure. The shipped launchers use the INI. Do not log the
+public-key file or contents.
 
 The historical Photon overlay label is misleading: the observed room path uses
 Unity Netcode/LiteNetLib with Tachyon and Dissonance integration. ConnectRoom reads
-target room `+0x30`, DTO voice address `+0x40` and server ID `+0x48`. Overlay `none`
+target room `+0x30`, DTO voice address `+0x40` and server ID `+0x48`; the removed
+override wrote the latter two through the write barrier when MoveNext state was -1,
+and the measured transport parses the address with IPAddress.Parse (no DNS). Overlay `none`
 before room selection is expected. Do not force online state or fake a successful
 connection. Photon app IDs alone do not supply approval/key exchange, Netcode
 spawn/RPC contracts or voice transport. Keep those backend requirements distinct
@@ -289,7 +307,24 @@ screen-share bulk serialization fixes stay active. Build/install preflight does
 not establish live screen-share behavior.
 
 The measured module-scan callback `0x203C270` only performs fatal exit 533223478 and
-is replaced. Other FatalApplicationQuit reasons and ordinary exits remain native.
+is replaced.
+
+`SuppressDuidMismatch` (default true, as in 2025; absent also means true) hooks
+CheatManager.CheckForDUIDMismatch `0x202CC40` only when enabled. The 2026 map
+from the live 20260323.14 capture names it there and matches every verified RVA
+in Methods.h. Metadata (Il2CppType byref at bit 29, validated on Int32.TryParse
+and Dictionary.TryGetValue) gives instance `bool(out string mismatchedDUID, out
+string actualDUID)`, unlike 2025's single out-param. Its entry is prologue-stolen
+(`nop; jmp` to a thunk outside the module), the same shape as the already-hooked
+HTTP SendRequest/Uri entries. No direct rel32 callers exist in the carved image.
+The hook calls the original under SEH for one logged outcome, clears both outs and
+returns false; it does not log device IDs. This is a workaround for the 2025-
+documented migration hang, not a repair of the stored ID.
+Added 2026-10-22: format/package build passed, a Config::Load harness read the
+flag as true for the template, the 2025 template and an absent key, false for
+false/off, and rejected other text; --check-config verified against the
+recflare-2026 client. The hook has not run in a live client yet: confirm a
+`[DUID]` log line and launch/Create Account on an affected machine. Other FatalApplicationQuit reasons and ordinary exits remain native.
 Native-fault observation records evidence without swallowing faults or changing
 Referee control flow. Do not broadly suppress errors to conceal a backend failure.
 
@@ -297,7 +332,7 @@ Referee control flow. Do not broadly suppress errors to conceal a backend failur
 
 `2026patch.log` is DLL-relative, reset per launch, capped at 1 MiB and serialized
 by a shared lock. Default messages cover startup, connection transitions and
-failures. `Verbose=1` enables routine HTTP/hook diagnostics. Capture emits a first
+failures. `EnableTracing=true` enables routine HTTP/hook diagnostics. Capture emits a first
 frame and sampled failures; module-scan/no-credit notices emit once. Never log
 credentials, paths/queries/headers, key contents or image bytes.
 
@@ -565,6 +600,31 @@ validation used DXGI for 60/60 warm frames with stable GDI handles and valid JPE
 Prior live testing confirmed removal of the repeating hitch at native presets;
 the 60 FPS target has startup confirmation, without separate live-rate validation.
 Local test scripts, captures, traces, installed INIs and binaries are excluded.
+
+### 2025-compatible INI layout and Tachyon override removal (2026-10-12)
+
+At the maintainer's request the INI now mirrors recflare/patch-2025's
+`2025patch.ini` (`[config]`, `ApiHost`, `EnableTracing`, true/false flags), and
+the `TachyonHost`/`TachyonServerId` override path was removed. Formatting and
+the package build passed with no compiler warnings. A local harness around
+`Config::Load` accepted the source and packaged templates, the unmodified 2025
+template and a 2025-style file with Photon keys present (ignored); it rejected
+the previous section layout, a non-boolean flag, an `ApiHost` with a path, a
+domain mismatch, private RSA fields, FPS 61 and a missing file. A second harness
+confirmed that a bare `ApiHost` keeps the request scheme while a full origin
+replaces it, and that other hosts are untouched. Windows Defender initially
+blocked the fresh local `Injector.exe`; after the maintainer allowed it,
+`--check-config` accepted the packaged, 2025 and 2025-style files, rejected the
+previous layout, a bad flag and a missing file, and verified the build against
+the fingerprinted `C:\Games\recflare-2026` client using the packaged INI.
+With the maintainer's approval and the client closed, the DLL and injector were
+then installed into `C:\Games\recflare-2026` and its INI converted to `[config]`
+with every value preserved (the discovery origin kept verbatim as `ApiHost`).
+Installed hashes matched the build and `Injector.exe --check-install` passed.
+Backup: x64/Build/recflare-2026-config-backup-20261012-152309. The installed
+launchers differ from the repository's and were left as they were. The client
+has not been launched: discovery redirection, key import without the ConnectRoom
+hook and room entry need a gameplay retest on this build. Nothing has been committed, pushed or published.
 
 ## Local Maker Room and Studio test presence
 

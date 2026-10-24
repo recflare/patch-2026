@@ -93,15 +93,6 @@ namespace RR::Offsets::RsaClass {
     inline constexpr uintptr_t ImportXmlMethod = 0x210;
 }
 
-namespace RR::Offsets::ConnectRoomState {
-    inline constexpr uintptr_t TargetRoom = 0x30;
-}
-
-namespace RR::Offsets::RoomInstance {
-    inline constexpr uintptr_t VoiceAddress = 0x40;
-    inline constexpr uintptr_t VoiceServerId = 0x48;
-}
-
 namespace RR::Offsets::String {
     inline constexpr uintptr_t Length = 0x10;
     inline constexpr uintptr_t Characters = 0x14;

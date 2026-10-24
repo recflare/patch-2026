@@ -1,8 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <windows.h>
-#pragma comment(lib, "Ws2_32.lib")
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -32,7 +29,7 @@ namespace RR::Patches {
     static unsigned gateCount = 0;
     static void (*removeCircuitFunctionOriginal)(void*, int32_t, void*) = nullptr;
     static RR::Config::Network networkConfig;
-    static std::string tachyonServerId;
+    static bool suppressDuidMismatch = true;
     static void* Gate(void* source) {
         // These zero-filled executable bytes were verified in the runtime Unity image.
         // Each 32-byte slot calls one GameAssembly target with Windows x64 shadow
@@ -667,7 +664,6 @@ namespace RR::Patches {
     static void (*offlineOriginal)(void*, bool, void*) = nullptr;
     static void (*clearTestCasesAndRuns)(void*) = nullptr;
     static void (*invalidateTestPlans)(void*) = nullptr;
-    static std::string tachyonEndpoint;
     static std::string tachyonPublicKey;
     static void (*tachyonCtorOriginal)(void*, void*, void*, void*) = nullptr;
     static void TachyonCtor(void* instance, void* networking, void* dependencies, void* method) {
@@ -701,8 +697,7 @@ namespace RR::Patches {
     static void (*connectedOriginal)(void*, uint64_t, void*) = nullptr;
     static void TransportConnected(void* instance, uint64_t clientId, void* method) {
         connectedOriginal(instance, clientId, method);
-        Log("[Networking] Tachyon room transport connected; client=%llu endpoint=%s", clientId,
-            tachyonEndpoint.empty() ? "matchmaking" : tachyonEndpoint.c_str());
+        Log("[Networking] Tachyon room transport connected; client=%llu", clientId);
     }
     static void (*disconnectedOriginal)(void*, uint64_t, void*) = nullptr;
     static void TransportDisconnected(void* instance, uint64_t clientId, void* method) {
@@ -711,33 +706,8 @@ namespace RR::Patches {
     }
     static void (*transportFailureOriginal)(void*, void*) = nullptr;
     static void TransportFailure(void* instance, void* method) {
-        Log("[Networking] Tachyon room transport failed; endpoint=%s", tachyonEndpoint.c_str());
+        Log("[Networking] Tachyon room transport failed");
         transportFailureOriginal(instance, method);
-    }
-    static void (*connectOriginal)(void*, void*) = nullptr;
-    // Unboxed MoveNext body: targetRoomInstance at +0x30; DTO voice address at +0x40.
-    // The configured endpoint affects only this process, never matchmaking.
-    static void ConnectRoom(void* state, void* method) {
-        if (!tachyonEndpoint.empty() && state && *static_cast<int*>(state) == -1) {
-            auto room = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(state) +
-                                                      RR::Offsets::ConnectRoomState::TargetRoom);
-            if (room) {
-                void* endpoint = stringNew(tachyonEndpoint.c_str());
-                void* id = tachyonServerId.empty() ? nullptr : stringNew(tachyonServerId.c_str());
-                if (endpoint && (tachyonServerId.empty() || id)) {
-                    auto address = reinterpret_cast<void**>(room + RR::Offsets::RoomInstance::VoiceAddress);
-                    auto server = reinterpret_cast<void**>(room + RR::Offsets::RoomInstance::VoiceServerId);
-                    *address = endpoint;
-                    writeBarrier(address, endpoint);
-                    if (id) {
-                        *server = id;
-                        writeBarrier(server, id);
-                    }
-                    Log("[Networking] selected Tachyon endpoint %s", tachyonEndpoint.c_str());
-                }
-            }
-        }
-        connectOriginal(state, method);
     }
 
     // Record the observed service-arena crash without swallowing the exception or
@@ -813,6 +783,38 @@ namespace RR::Patches {
         if (InterlockedCompareExchange(&logged, 1, 0) == 0) {
             Log("[Exit] patch module-scan exit suppressed (533223478)");
         }
+    }
+    // Ported from recflare/patch-2025's SuppressDuidMismatch. When the stored
+    // device ID differs from the runtime one, a true result sends the client
+    // down a PlayerReporting/v1/deviceId migration that hangs launch / Create
+    // Account against archival servers. Forcing false skips it; matching machines
+    // already return false. This is a workaround and does not repair the stored ID.
+    // Metadata gives bool(self, String** mismatched, String** actual, MethodInfo*):
+    // four register arguments, so the MinHook trampoline is called directly. The
+    // original runs once per call for the logged outcome (the 2025 analysis found
+    // it only compares; the hang is in the caller), under SEH because its entry is
+    // a relocated stolen-prologue jump. Out-params are cleared, as in 2025; null
+    // stores need no write barrier. Device IDs are identifiers and are not logged.
+    static bool (*duidMismatchOriginal)(void*, void**, void**, void*) = nullptr;
+    static bool DuidMismatch(void* instance, void** mismatched, void** actual, void* method) {
+        bool original = false;
+        __try {
+            original = duidMismatchOriginal(instance, mismatched, actual, method);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            original = false;
+        }
+        static LONG logged = 0, loggedMismatch = 0;
+        if (InterlockedCompareExchange(&logged, 1, 0) == 0 ||
+            (original && InterlockedCompareExchange(&loggedMismatch, 1, 0) == 0)) {
+            Log("[DUID] CheatManager.CheckForDUIDMismatch original=%d; forcing false", original);
+        }
+        if (mismatched) {
+            *mismatched = nullptr;
+        }
+        if (actual) {
+            *actual = nullptr;
+        }
+        return false;
     }
     static void* Send(void* request, void* method) {
         // Preserve the client's Uri type and constructor semantics. Replacing
@@ -928,9 +930,9 @@ namespace RR::Patches {
         // configuration before resolving or enabling callbacks; initialization
         // is once per process, with no concurrent settings reload or live unload.
         networkConfig = settings.network;
-        tachyonServerId = settings.tachyonServerId;
         tachyonPublicKey = settings.voiceKeyXml;
         screenShareFps = settings.framesPerSecond;
+        suppressDuidMismatch = settings.suppressDuidMismatch;
         game = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"GameAssembly.dll"));
         unity = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"UnityPlayer.dll"));
         if (!game || !unity) {
@@ -1083,6 +1085,9 @@ namespace RR::Patches {
                   "SessionManager.FatalApplicationQuit.Diagnostic") ||
             !Hook(RR::Methods::Session::ModuleScanDetected, reinterpret_cast<void*>(ModuleScanDetected),
                   nullptr, "CheatManager.ModuleScanDetected") ||
+            (suppressDuidMismatch &&
+             !Hook(RR::Methods::Session::CheckForDUIDMismatch, reinterpret_cast<void*>(DuidMismatch),
+                   reinterpret_cast<void**>(&duidMismatchOriginal), "CheatManager.CheckForDUIDMismatch")) ||
             !Hook(RR::Methods::Circuits::RemoveFunction, reinterpret_cast<void*>(RemoveCircuitFunction),
                   reinterpret_cast<void**>(&removeCircuitFunctionOriginal),
                   "CircuitsV2.RemoveFunction.Lifecycle")) {
@@ -1151,53 +1156,15 @@ namespace RR::Patches {
             }
         }
         Log("[DesktopCapture] requested refresh=%d FPS (0 preserves original presets)", screenShareFps);
-        if (!settings.tachyonHost.empty()) {
-            std::string host, port;
-            RR::Config::Endpoint(settings.tachyonHost, host, port);
-            tachyonEndpoint = settings.tachyonHost;
-            {
-                // Tachyon.STMBWJUYIQW (9AA3540) splits host:port then calls
-                // IPAddress.Parse at AD86D30; it does not resolve DNS hostnames.
-                WSADATA data{};
-                addrinfo hints{}, *addresses = nullptr;
-                hints.ai_family = AF_INET;
-                hints.ai_socktype = SOCK_DGRAM;
-                if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
-                    MH_Uninitialize();
-                    return 7;
-                }
-                int error = getaddrinfo(host.c_str(), nullptr, &hints, &addresses);
-                char numeric[INET_ADDRSTRLEN]{};
-                if (!error && addresses) {
-                    InetNtopA(AF_INET, &reinterpret_cast<sockaddr_in*>(addresses->ai_addr)->sin_addr, numeric,
-                              sizeof(numeric));
-                }
-                if (addresses) {
-                    freeaddrinfo(addresses);
-                }
-                WSACleanup();
-                if (!numeric[0]) {
-                    Log("[Networking] Tachyon hostname resolution failed (%d)", error);
-                    MH_Uninitialize();
-                    return 7;
-                }
-                tachyonEndpoint = std::string(numeric) + ":" + port;
-                Log("[Networking] resolved %s to %s", host.c_str(), numeric);
-            }
-        }
-        // Key replacement can accompany matchmaking's address without overriding it.
+        // Key replacement accompanies matchmaking's endpoint and server ID; the
+        // patch never overrides the room transport address.
         if (!tachyonPublicKey.empty()) {
             if (!Hook(RR::Methods::Tachyon::Constructor, reinterpret_cast<void*>(TachyonCtor),
                       reinterpret_cast<void**>(&tachyonCtorOriginal), "Tachyon.ctor.ConfiguredKey")) {
                 MH_Uninitialize();
                 return 9;
             }
-        }
-        if (!tachyonEndpoint.empty() || !tachyonPublicKey.empty()) {
-            if (!writeBarrier ||
-                !Hook(RR::Methods::Tachyon::ConnectRoom, reinterpret_cast<void*>(ConnectRoom),
-                      reinterpret_cast<void**>(&connectOriginal), "Tachyon.ConnectRoom.MoveNext") ||
-                !Hook(RR::Methods::Tachyon::Connected, reinterpret_cast<void*>(TransportConnected),
+            if (!Hook(RR::Methods::Tachyon::Connected, reinterpret_cast<void*>(TransportConnected),
                       reinterpret_cast<void**>(&connectedOriginal), "Tachyon.OnClientConnected") ||
                 !Hook(RR::Methods::Tachyon::Disconnected, reinterpret_cast<void*>(TransportDisconnected),
                       reinterpret_cast<void**>(&disconnectedOriginal), "Tachyon.OnClientDisconnected") ||
@@ -1213,10 +1180,8 @@ namespace RR::Patches {
         auto result = MH_ApplyQueued();
         Log("[Build] hooks enabled status=%d", result);
         const bool hookReady = result == MH_OK;
-        if (hookReady && (!tachyonEndpoint.empty() || !tachyonPublicKey.empty())) {
-            Log("[Networking] configured endpoint ready before room join: %s; public key configured=%d",
-                tachyonEndpoint.empty() ? "matchmaking (no address override)" : tachyonEndpoint.c_str(),
-                !tachyonPublicKey.empty());
+        if (hookReady && !tachyonPublicKey.empty()) {
+            Log("[Networking] Tachyon public key configured; matchmaking supplies the endpoint");
             Log("[Networking] room transport connects during room join; title-screen Photon:none is expected "
                 "before that connection");
         }

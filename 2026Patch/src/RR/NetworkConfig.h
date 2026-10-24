@@ -96,19 +96,27 @@ namespace RR::Config {
     }
 
     struct Network {
-        std::string serverUrl, serverDomain, cachedServerDomain;
+        std::string apiHost, serverDomain, cachedServerDomain;
         bool disableCertificatePinning = false;
         bool allowUnsignedImages = false;
 
+        // ApiHost shares the 2025 patch's key. A bare host[:port] replaces only
+        // the authority, so the request keeps its scheme as it does there; a
+        // full http(s) origin replaces the scheme as well.
+        bool ApiOrigin() const {
+            return apiHost.find("://") != std::string::npos;
+        }
+
         bool Valid() const {
             Url url;
-            if (!serverUrl.empty() &&
-                (!ParseUrl(serverUrl, url) || (url.scheme != "https" && url.scheme != "http") ||
-                 url.authorityEnd != serverUrl.size())) {
+            const std::string origin = ApiOrigin() ? apiHost : "https://" + apiHost;
+            if (!apiHost.empty() &&
+                (!ParseUrl(origin, url) || (url.scheme != "https" && url.scheme != "http") ||
+                 url.authorityEnd != origin.size())) {
                 return false;
             }
             return (serverDomain.empty() || Host(serverDomain)) &&
-                   (serverUrl.empty() || serverDomain.empty() || InDomain(url.host, serverDomain)) &&
+                   (apiHost.empty() || serverDomain.empty() || InDomain(url.host, serverDomain)) &&
                    (cachedServerDomain.empty() || Host(cachedServerDomain));
         }
 
@@ -121,9 +129,13 @@ namespace RR::Config {
             if (!ParseUrl(value, url)) {
                 return false;
             }
-            if (!serverUrl.empty() && url.host == "ns.rec.net" &&
+            if (!apiHost.empty() && url.host == "ns.rec.net" &&
                 (url.scheme == "https" || url.scheme == "http")) {
-                value.replace(0, url.authorityEnd, serverUrl);
+                if (ApiOrigin()) {
+                    value.replace(0, url.authorityEnd, apiHost);
+                } else {
+                    value.replace(url.authorityStart, url.authorityEnd - url.authorityStart, apiHost);
+                }
                 return true;
             }
             // Current hosts take precedence when the old domain is a parent of
