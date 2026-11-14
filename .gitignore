@@ -55,3 +55,7 @@ priv.xml
 
 # Generated distribution archives
 *.zip
+
+# Rec Room game files + runtime dumps -- never commit
+recroom/
+client.zip
