@@ -21,7 +21,7 @@ if (!$formatter) {
     throw 'clang-format is required. Install the Visual Studio C++ Clang tools or add clang-format to PATH.'
 }
 
-$roots = @('2026Patch\src', 'Injector') |
+$roots = @('2026Patch\src', 'PreserveProxy') |
     ForEach-Object { Join-Path $PSScriptRoot $_ }
 # Vendored dependencies retain
 # upstream formatting/license text. Include the separator to exclude descendants

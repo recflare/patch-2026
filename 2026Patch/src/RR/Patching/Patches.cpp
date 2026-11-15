@@ -12,6 +12,7 @@
 #include "../../Utils/LocalTestPresence.h"
 #include "../../Utils/ScreenShareWire.h"
 #include "../../Utils/Logging.h"
+#include "../BuildGuard.h"
 #include "../Config.h"
 #include "../Methods.h"
 #include "../Offsets.h"
@@ -713,7 +714,9 @@ namespace RR::Patches {
     // Record the observed service-arena crash without swallowing the exception or
     // changing Referee control flow. No request bodies or authentication data are logged.
     static LONG CALLBACK NativeFault(EXCEPTION_POINTERS* fault) {
-        const uintptr_t referee = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"Referee.dll"));
+        // Under the preservation loader, Referee.dll in the module list is the proxy;
+        // anchor diagnostics to the real protector the loader exposes instead.
+        const uintptr_t referee = RR::BuildGuard::LoadedProtectorBase();
         const uintptr_t address = reinterpret_cast<uintptr_t>(fault->ExceptionRecord->ExceptionAddress);
         if (fault->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && referee &&
             (address == referee + RR::Methods::Referee::ObservedFault1 ||

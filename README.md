@@ -5,15 +5,18 @@ client versions are unsupported. The patch leaves the original game files intact
 
 ## Installation
 
-1. Extract all five files from the release ZIP (`2026Patch-<version>-x64.zip`) into the folder containing
-   `RecRoom.exe`: `2026patch.dll`, `Injector.exe`, `2026patch.ini`,
-   `RecRoomScreen.bat` and `RecRoomVR.bat`.
+1. Extract all the files from the release ZIP (`2026Patch-<version>-x64.zip`) into the
+   folder containing `RecRoom.exe`: `2026patch.dll`, `PreserveLoader.dll`,
+   `2026patch.ini` and the batch launchers.
 2. Edit `2026patch.ini` using the connection details supplied by your server operator.
-3. Run `RecRoomScreen.bat` for desktop mode or `RecRoomVR.bat` for VR.
+3. Run `Install-PreserveLoader.bat` once. It moves the client's own `Referee.dll`
+   into `preserve\` and puts the preservation loader in its place, so the client
+   binds the patch through its own import instead of through an external injector.
+4. Run `RecRoomScreen.bat` for desktop mode or `RecRoomVR.bat` for VR.
 
-Alternatively, run `Injector.exe` first, leave its window open, then start
-`RecRoom.exe` from the same installation. The batch launchers handle this order
-automatically and select desktop or VR mode.
+There is no second program to start and nothing to leave running: the launcher
+starts the client, and the loader attaches the patch by itself once
+`GameAssembly.dll` appears.
 
 When updating an existing installation, ensure the game is closed before replacing patch files
 and keep your configured `2026patch.ini` unless explicitly mentioned.
@@ -61,21 +64,20 @@ and `Verbose` to `EnableTracing`. On/off settings accept `true`/`false` or `1`/`
 - **Missing files:** Place the missing patch files beside `RecRoom.exe`. Keep your
   existing INI if it already contains your server settings.
 - **Rejected settings:** Check the option named in the error against the INI notes
-  and your operator's details. To run a separate configuration check, open a terminal
-  in the game folder and enter `.\Injector.exe --check-install`.
+  and your operator's details. `2026patch.log` in the game folder records the
+  reason.
 - **Unsupported client:** Use client `20260323.14`, Steam manifest `8867414017562658247`. Do not mix files from different
   game versions.
-- **Injector stays on Waiting:** If you started the injector manually, start the
-  game from the same installation. The batch launchers start it automatically.
-  Check that the patch files and `RecRoom.exe` are in the same folder and that the
-  game actually started. The injector skips other installations and processes that
-  already have the patch loaded.
+- **The patch does not attach:** Check that `preserve\Referee.dll` exists and that
+  `preserve\modules\2026patch.dll` is next to it. `Install-PreserveLoader.bat`
+  sets both up; `Restore-RefereeProtector.bat` puts the original back.
 - **Connection problems:** Confirm addresses and the public key with your server
   operator. The developer menu's transport address can show `none` at the title screen until a room
   connection begins.
 - **Need more information:** Check `2026patch.log` in the game folder. Set `EnableTracing=true`
   before your next launch, reproduce the issue, then set it back to `false`.
   The log resets each launch and is limited to 1 MiB, so save it before launching again.
+  `preserve-loader.log` next to `RecRoom.exe` holds the loader's own diagnostics.
 
 ## Other information
 
@@ -87,5 +89,5 @@ handling. This does not resolve missing or incompatible room save data.
 Developer and build guidance is in [AGENTS.md](AGENTS.md).
 
 Credits:
-[Carpetsoft/Rec-Room-2025-Patch](https://github.com/Carpetsoft/Rec-Room-2025-Patch) for the original 2025 patch and injector. Amazing work!
+[Carpetsoft/Rec-Room-2025-Patch](https://github.com/Carpetsoft/Rec-Room-2025-Patch) for the original 2025 patch. Amazing work!
 [recflare/patch-2025](https://github.com/recflare/patch-2025) for formatting, packaging, and other miscellaneous references. Stay awesome and open-source! <3

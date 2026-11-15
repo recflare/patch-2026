@@ -26,18 +26,40 @@ static DWORD WINAPI InitializePatch(void* parameter) {
     PatchLogging::BeginSession(directory + L"\\2026patch.log");
 
     // Configuration precedes all hook creation, so the first intercepted request
-    // sees the same settings as injector preflight. Blank routing fields retain
+    // sees the same settings as a command-line preflight. Blank routing fields retain
     // client endpoints; malformed supplied values abort this worker with no hooks.
+    //
+    // The configuration is looked for next to the DLL first, then next to the
+    // game executable. The second location is what a user has: under the
+    // preservation proxy the patch is loaded from preserve\modules, but
+    // 2026patch.ini belongs beside RecRoom.exe with the rest of the drop-in
+    // files. Without the fallback the proxy install would need a second copy of
+    // the INI in a folder the user never sees.
+    std::wstring configPath = directory + L"\\2026patch.ini";
+    if (GetFileAttributesW(configPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        wchar_t exePath[MAX_PATH]{};
+        if (GetModuleFileNameW(nullptr, exePath, MAX_PATH)) {
+            const std::wstring exe(exePath);
+            const auto exeSeparator = exe.find_last_of(L"\\/");
+            if (exeSeparator != std::wstring::npos) {
+                const std::wstring candidate = exe.substr(0, exeSeparator) + L"\\2026patch.ini";
+                if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    configPath = candidate;
+                }
+            }
+        }
+    }
+
     RR::Config::Settings settings;
     std::string error;
-    if (!RR::Config::Load(directory + L"\\2026patch.ini", settings, error)) {
+    if (!RR::Config::Load(configPath, settings, error)) {
         PatchLogging::Log("[Config] %s", error.c_str());
         return 7;
     }
     PatchLogging::verboseLogging = settings.verbose;
     PatchLogging::Log("[Build] Native 20260323.14 patch");
 
-    // Injector preflight checks files in its target installation. Repeat the
+    // The loader install hashes the same files. Repeat the
     // check against the modules loaded by THIS process before resolving any RVA:
     // a manual DLL load must not bypass the version boundary.
     if (!RR::BuildGuard::SupportsLoadedClient()) {

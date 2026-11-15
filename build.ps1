@@ -48,6 +48,11 @@ if ($Package) {
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (!$installation) { throw 'Visual Studio C++ x64 build tools are required.' }
+# PreserveLoader's trampoline is assembly; locate this toolset's ml64 (same component as Cl).
+$msvcToolset = @(Get-ChildItem (Join-Path $installation 'VC\Tools\MSVC') -Directory |
+    Sort-Object Name -Descending | Select-Object -First 1)[0].FullName
+$ml64 = Join-Path $msvcToolset 'bin\Hostx64\x64\ml64.exe'
+if (!(Test-Path $ml64)) { throw 'Visual Studio C++ x64 build tools are required (ml64.exe not found).' }
 $developerCommand = Join-Path $installation 'Common7\Tools\VsDevCmd.bat'
 $output = Join-Path $PSScriptRoot 'x64\Release'
 $build = Join-Path $PSScriptRoot 'x64\Build'
@@ -66,7 +71,10 @@ cl /nologo /O2 /c /TC ..\..\2026Patch\src\Utils\deps\minhook\src\hook.c ..\..\20
 if errorlevel 1 exit /b 1
 cl /nologo /W4 /O2 /MT /EHsc /std:c++17 /LD ..\..\2026Patch\src\main.cpp ..\..\2026Patch\src\RR\Patching\Patches.cpp hook.obj buffer.obj trampoline.obj hde64.obj /link /OUT:2026patch.dll
 if errorlevel 1 exit /b 1
-cl /nologo /W4 /O2 /MT /EHsc /std:c++17 ..\..\Injector\injector.cpp /link /OUT:Injector.exe
+"$ml64" /nologo /c ..\..\PreserveProxy\jjiEVn.asm /FojjiEVn.obj
+if errorlevel 1 exit /b 1
+cl /nologo /W4 /O2 /MT /EHsc /std:c++17 /LD ..\..\PreserveProxy\proxy.cpp jjiEVn.obj /link /DEF:"..\..\PreserveProxy\PreserveLoader.def" /OUT:PreserveLoader.dll
+if errorlevel 1 exit /b 1
 exit /b %errorlevel%
 "@
 [IO.File]::WriteAllText($recipe, $commands, [Text.Encoding]::ASCII)
@@ -75,19 +83,21 @@ try {
     & $env:ComSpec /d /c $recipe
     if ($LASTEXITCODE -ne 0) { throw "Native build failed: $LASTEXITCODE" }
 } finally { Pop-Location }
-foreach ($name in @('2026patch.dll', 'Injector.exe')) {
+foreach ($name in @('2026patch.dll', 'PreserveLoader.dll')) {
     Copy-Item -LiteralPath (Join-Path $build $name) -Destination (Join-Path $output $name)
 }
-Write-Host "Built Injector.exe and 2026patch.dll in $output"
+Write-Host "Built 2026patch.dll and PreserveLoader.dll in $output"
 
 if ($Package) {
     [IO.File]::WriteAllText((Join-Path $output '2026patch.ini'), $ini, [Text.Encoding]::ASCII)
-    foreach ($name in @('RecRoomScreen.bat', 'RecRoomVR.bat')) {
+    foreach ($name in @('RecRoomScreen.bat', 'RecRoomVR.bat', 'Install-PreserveLoader.bat', 'RecRoomPreserve.bat', 'Restore-RefereeProtector.bat')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $output $name)
     }
     # Do not archive the output directory: it can contain local test settings,
-    # old artifacts or operator key files. Only these five drop-in files ship.
-    $files = @('2026patch.dll', 'Injector.exe', '2026patch.ini', 'RecRoomScreen.bat', 'RecRoomVR.bat') |
+    # old artifacts or operator key files. Only these eight drop-in files ship.
+    $files = @('2026patch.dll', 'PreserveLoader.dll', '2026patch.ini', 'RecRoomScreen.bat',
+        'RecRoomVR.bat', 'Install-PreserveLoader.bat', 'RecRoomPreserve.bat',
+        'Restore-RefereeProtector.bat') |
         ForEach-Object { Join-Path $output $_ }
     $zip = Join-Path $output 'Patch26Dist.zip'
     Compress-Archive -LiteralPath $files -DestinationPath $zip -Force

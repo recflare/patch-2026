@@ -20,7 +20,7 @@ jobs:
         run: .\format.ps1 -Check
       # build.cmd -Package stages the INI template and both launchers beside the
       # binaries and rejects private RSA fields, so CI and a local build produce
-      # the same drop-in set. Upload the five files flat, by explicit allowlist,
+      # the same drop-in set. Upload the files flat, by explicit allowlist,
       # so the downloaded artifact is itself the drop-in set.
       - name: Build and package
         shell: pwsh
@@ -32,10 +32,13 @@ jobs:
           if-no-files-found: error
           path: |
             x64/Release/2026patch.dll
-            x64/Release/Injector.exe
+            x64/Release/PreserveLoader.dll
             x64/Release/2026patch.ini
             x64/Release/RecRoomScreen.bat
             x64/Release/RecRoomVR.bat
+            x64/Release/Install-PreserveLoader.bat
+            x64/Release/RecRoomPreserve.bat
+            x64/Release/Restore-RefereeProtector.bat
 
   release:
     name: Release
@@ -53,8 +56,11 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          Compress-Archive -Path dist\2026patch.dll, dist\Injector.exe, dist\2026patch.ini, `
-            dist\RecRoomScreen.bat, dist\RecRoomVR.bat `
+          Compress-Archive -Path dist\2026patch.dll, dist\PreserveLoader.dll, `
+            dist\2026patch.ini, `
+            dist\RecRoomScreen.bat, dist\RecRoomVR.bat, `
+            dist\Install-PreserveLoader.bat, dist\RecRoomPreserve.bat, `
+            dist\Restore-RefereeProtector.bat `
             -DestinationPath "2026Patch-$env:GITHUB_REF_NAME-x64.zip"
       - name: Create release
         shell: pwsh
