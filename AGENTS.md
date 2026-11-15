@@ -11,7 +11,8 @@ are recovery material, not alternate development or installation baselines.
 
 ## What this is
 
-An injected Windows x64 DLL and standalone injector for Rec Room **20260323.14**.
+An injected Windows x64 DLL for Rec Room **20260323.14**, attached through the
+client's own import rather than through an external program.
 The patch routes selected client requests to configured compatible services and
 restores measured client behaviors after official-service retirement. It does not
 modify original client binaries on disk. Preserve original source checkouts and client installations.
@@ -54,19 +55,18 @@ inserts only a public key. Packaging rejects private RSA fields before copying
 output. Raw captures, credentials, private keys and development artifacts stay out
 of Git and release files.
 
-`Patch26Dist.zip` must contain exactly `2026patch.dll`, `Injector.exe`,
-`2026patch.ini`, `RecRoomScreen.bat` and `RecRoomVR.bat`. Use the explicit allowlist,
+`Patch26Dist.zip` must contain exactly `2026patch.dll`, `PreserveLoader.dll`,
+`2026patch.ini`, `RecRoomScreen.bat`, `RecRoomVR.bat`, `Install-PreserveLoader.bat`,
+`RecRoomPreserve.bat` and `Restore-RefereeProtector.bat`. Use the explicit allowlist,
 never archive the output directory. Root launchers differ only in
 `+forcemode:screen` versus `+forcemode:vr`; keep shared behavior synchronized.
-They preflight, start the injector, wait for its readiness event, then start the
-game from the installation directory. That event does not establish hook readiness.
-Manual launch is also supported: start Injector.exe first, keep it running and
-then start RecRoom.exe from the same installation. User-facing prompts must cover
-this path as well as the automatic batch launchers.
+They launch the client through the preservation loader, with no second process to
+start and nothing to leave running. `RecRoomPreserve.bat` is the same in screen
+mode and is the one to point users at when installing from source.
 
 CI checks formatting and builds/packages the native binaries, then uploads the
-five drop-in files flat as artifact `2026Patch-x64`. Releases run only for `v*`
-tags: as in recflare/patch-2025, the release job zips those five files by explicit
+eight drop-in files flat as artifact `2026Patch-x64`. Releases run only for `v*`
+tags: as in recflare/patch-2025, the release job zips those eight files by explicit
 list into `2026Patch-<tag>-x64.zip` and publishes it with generated notes. Local
 `Patch26Dist.zip` has the same contents; keep both allowlists identical. Research/test sources are excluded from this source snapshot.
 Earlier automated checks recorded below are completed validation, not the current
@@ -89,7 +89,7 @@ CI suite. Keep local investigation tooling outside the published tree.
 | `Utils/ScreenShareWire.h` | Verified screen-share byte-array wire encoding |
 | `Utils/deps/minhook` | Vendored hook dependency; preserve upstream/license text |
 
-The standalone injector is `Injector/injector.cpp`. Configuration and batch
+The preservation loader is `PreserveProxy/`. Configuration and batch
 launchers live at the repository root; this guide owns technical maintenance notes.
 
 DllMain runs under the Windows loader lock. It creates the worker and closes its
@@ -107,8 +107,8 @@ read `2026patch.log` for initialization status and errors.
 
 ## Client identity, module bases and layout
 
-Injector preflight hashes files without loading game DLLs. The patch repeats the
-check using each loaded module's on-disk path. All three fingerprints must match:
+The patch hashes the loaded modules before resolving any RVA, so a manual load
+cannot bypass the version boundary. All three fingerprints must match:
 
 | Module | SHA-256 |
 | --- | --- |
@@ -127,34 +127,31 @@ Equal numbers in different owning types are distinct fields: retain the measured
 casts/widths. Never apply an address table from another client build. Preserve
 obfuscated-symbol mappings and disassembly evidence.
 
-## Injector discovery and early Referee bootstrap
+## Arena seam and Referee bootstrap
 
-The injector matches unpatched `RecRoom.exe` by its full configured path and skips
-processes already containing current/legacy patch DLLs. A path mismatch can leave
-it waiting indefinitely; check launch configuration before changing detection.
-Attach attempts are serialized by `Local\Patch2026Injector`. The path-derived
-readiness event means the injector is watching, not that patch initialization is
-complete. Do not launch or terminate unrelated clients during process discovery.
+The standalone injector that used to ship with this patch matched unpatched
+`RecRoom.exe` by its full configured path, skipped processes already containing a
+patch DLL, and serialized attach attempts around `Local\Patch2026Injector`. It
+existed because the retired-service arena could only be supplied from outside the
+process, and it was removed when the proxy started publishing the arena itself
+from inside. Do not reintroduce an out-of-process launcher alongside the loader.
 
 The measured retired-service arena seam is Referee slot `0x6C10858`, dereference
-instruction `0x69839D`. The injector checks bytes `41 8B 00` and an initialized
-pointer slot before writing. An existing nonzero arena is retained. Otherwise it
-allocates a 64 MiB local arena with three channel descriptors at stride `0x1500030`.
+instruction `0x69839D`. Bytes at the seam are `41 8B 00` (`mov eax,[r8]`). An
+existing nonzero arena must be retained. Otherwise the loader builds a 64 MiB
+local arena with three channel descriptors at stride `0x1500030`.
 Each channel has queues at `+0xA0` and `+0x100040`, lengths `0x80000` and `0x1000000`.
 Both capacities are `(length - 0x1C) / 2`: zero lengths underflowed and caused delayed
 Referee faults at `0x62BB0B`/`0x216D035`. Prepare all headers before publishing the
 arena pointer. The local queues have no service consumer; preserve normal full-queue
 handling and do not invent service approval.
 
-LoadLibraryW can be forwarded to another system module. Remote injection resolves
-its actual owning module, then applies the function's relative offset to that
-module in the target process. An injector-local absolute pointer is not a remote
-address contract. Module presence after loading still says nothing about hook readiness.
+A loaded module says nothing about hook readiness.
 
 ## Preservation proxy loader and the arena seam
 
 `PreserveProxy/` builds `PreserveLoader.dll`, which the client loads in place of
-`Referee.dll` so the patch can be attached without the standalone injector. The
+`Referee.dll` so the patch can be attached with no external program at all. The
 loader exports `jjiEVn` and forwards it to the real protector, which it loads
 from `preserve\Referee.dll`. `preserve\modules\*.dll` is the module folder: the
 loader attaches every DLL in it once `GameAssembly.dll` appears, which is how
@@ -171,7 +168,7 @@ unbound and the loader has nothing to forward to.
 The protector keeps its arena pointer in a local variable and stores the
 ADDRESS of that local in the slot at `Referee+0x6C10858`. It then reads that
 local, and every arena address it derives afterwards is `base + offset`. The
-retired service used to supply that arena; the injector builds a synthetic one
+retired service used to supply that arena; the loader builds a synthetic one
 and writes it into the protector's own stack frame, between the store and the
 read. Get this wrong and the protector derives thousands of offsets from a null
 base, caches them in its own data, and the client never reaches a consistent
@@ -207,7 +204,7 @@ buffer, and an ordinary worker thread drains that buffer to the log. That worker
 also reinstalls the handlers periodically, because the protector removes
 vectored handlers it finds while it unpacks.
 
-The synthetic arena is the injector's: 64 MiB, three channel descriptors at
+The synthetic arena is the loader's: 64 MiB, three channel descriptors at
 stride `0x1500030`, each with queues at `+0xA0` and `+0x100040` and lengths
 `0x80000` and `0x1000000`. Its capacity is `(length - 0x1C) / 2`; a zero length
 underflows and produces invalid second-buffer pointers and later access
@@ -301,7 +298,7 @@ endpoint is under local development testing; prior release validation does not
 cover it.
 
 Environment override `PATCH26_TACHYON_PUBLIC_KEY` follows the INI. Any local
-tooling that sets it must pass the same environment to injector/client and restore
+tooling that sets it must pass the same environment to the client and restore
 the caller's value on failure. The shipped launchers use the INI. Do not log the
 public-key file or contents.
 
@@ -412,8 +409,10 @@ failures. `EnableTracing=true` enables routine HTTP/hook diagnostics. Capture em
 frame and sampled failures; module-scan/no-credit notices emit once. Never log
 credentials, paths/queries/headers, key contents or image bytes.
 
-Use drop-in `Injector.exe --check-install` for read-only installation/configuration
-preflight. Formatting/build/package checks verify source and distribution integrity,
+Installation is verified by launching the client: `Install-PreserveLoader.bat`
+must leave `preserve\Referee.dll` and `preserve\modules\2026patch.dll` in place,
+and `2026patch.log` must report `hooks enabled status=0`. Formatting/build/package
+checks verify source and distribution integrity,
 not gameplay. Behavior changes need a restarted fingerprinted client and exercise
 of the affected path. Record observed signatures/fields and unverified outcomes in
 this guide and hook comments. Raw captures and local tooling stay outside the
@@ -421,7 +420,7 @@ published tree. Preserve evidence from rejected seams so future work does not
 repeat them, while clearly distinguishing historical observations from current tests.
 
 Use four-space indentation, attached braces and left-aligned pointer/reference
-types. `format.ps1` covers first-party patch/injector code and excludes deps.
+types. `format.ps1` covers first-party patch code and excludes deps.
 `.clang-format` disables namespace-ending comments. Avoid redundant namespace
 labels and line-by-line narration; retain detailed comments on measured behavior,
 ABI/layout assumptions, resource ownership, scope and failure handling. Keep

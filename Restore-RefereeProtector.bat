@@ -1,6 +1,7 @@
 @echo off
 rem Reverts Install-PreserveLoader.bat: moves preserve\Referee.dll back to Referee.dll and
-rem restores 2026patch.dll to the game root (so the classic Injector flow works again).
+rem restores 2026patch.dll to the game root. The game no longer loads through the preservation
+rem loader afterwards.
 rem Other modules you added under preserve\modules\ are left untouched on purpose.
 setlocal
 cd /d "%~dp0"

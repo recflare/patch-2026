@@ -15,7 +15,7 @@
 //      arena: the faulting instruction is "mov eax,[r8]" at Referee+0x69839D
 //      with r8 = 0x100040, i.e. a NULL arena pointer plus the second queue's
 //      offset (+0x100040). The handler builds the same 64 MiB local arena the
-//      classic injector builds, repoints r8 at the arena base, and resumes the
+//      out-of-process publisher this loader replaces used to build, repoints r8
 //      protector. The protector's DllMain never returns before the loader can
 //      ask for its base, so the handler recovers the base from the faulting
 //      module's PE header instead of from a module-list lookup.
@@ -48,7 +48,7 @@
 #include <vector>
 #include <algorithm>
 
-extern "C" unsigned long long g_realXNfn = 0;   // protector's jjiEVn export
+extern "C" unsigned long long g_realXNfn = 0; // protector's jjiEVn export
 static uintptr_t g_protectorBase = 0;
 static uintptr_t g_arena = 0;
 static LONG g_publishBusy = 0;
@@ -56,24 +56,23 @@ static LONG g_publishBusy = 0;
 static void Log(const char* fmt, ...);
 static void GetModuleDir(HMODULE module, wchar_t* out, size_t outCount);
 
-// Retired-service arena seam (see AGENTS.md "Injector discovery and early Referee
+// Retired-service arena seam (see AGENTS.md "Arena seam and Referee
 // bootstrap"). The protector reads a NULL arena pointer at Referee+0x69839D and
-// faults; we publish the same local arena the classic injector builds.
-static const uintptr_t kArenaSlotOffset = 0x6C10858;   // Referee+ArenaSlot
+// faults; we publish the same local arena that code path used to build.
+static const uintptr_t kArenaSlotOffset = 0x6C10858; // Referee+ArenaSlot
 static const uintptr_t kArenaStride = 0x1500030ull;
-static const uintptr_t kArenaSize = 0x4000000ull;      // 64 MiB
+static const uintptr_t kArenaSize = 0x4000000ull; // 64 MiB
 static const uintptr_t kQueueOffsets[2] = {0xA0, 0x100040};
 static const uint32_t kQueueLengths[2] = {0x80000, 0x1000000};
-static const uintptr_t kBootstrapOffset = 0x69839D;   // Referee+BootstrapInstruction
+static const uintptr_t kBootstrapOffset = 0x69839D; // Referee+BootstrapInstruction
 
-// Build the arena the classic injector builds: three channel descriptors at
+// Build the arena the client expects: three channel descriptors at
 // stride 0x1500030, each with two length-prefixed double-buffered queues.
 // Both capacities are (length - 0x1C) / 2; a zero length underflows and
 // produces invalid second-buffer pointers and later access violations.
 // There is no service consumer; normal full-queue handling remains intact.
 static uintptr_t BuildArena() {
-    uintptr_t arena = (uintptr_t)VirtualAlloc(nullptr, kArenaSize, MEM_COMMIT | MEM_RESERVE,
-                                              PAGE_READWRITE);
+    uintptr_t arena = (uintptr_t)VirtualAlloc(nullptr, kArenaSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!arena) {
         Log("arena: VirtualAlloc failed (error %lu)", GetLastError());
         return 0;
@@ -91,17 +90,19 @@ static uintptr_t BuildArena() {
 }
 
 // Publish the arena into the protector's pointer slot. The slot holds a
-// pointer to a pointer; the injector writes the arena address there.
+// pointer to a pointer; the retired service used to write the arena address there.
 static void PublishArenaAt(uintptr_t base) {
     uintptr_t slot = base + kArenaSlotOffset;
     uintptr_t pointer = *(uintptr_t*)slot;
     if (!pointer) {
-        return;   // the protector has not published its arena pointer yet
+        return; // the protector has not published its arena pointer yet
     }
     uintptr_t arena = g_arena;
     if (!arena) {
         arena = BuildArena();
-        if (!arena) return;
+        if (!arena) {
+            return;
+        }
         g_arena = arena;
     }
     *(uintptr_t*)pointer = arena;
@@ -115,9 +116,11 @@ static uintptr_t g_expectedBase = 0;
 
 // Read an image's preferred base from its PE headers.
 static uintptr_t ReadImageBaseFromFile(const wchar_t* path) {
-    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return 0;
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
     LARGE_INTEGER size = {};
     GetFileSizeEx(file, &size);
     if (size.QuadPart < 0x1000) {
@@ -131,10 +134,16 @@ static uintptr_t ReadImageBaseFromFile(const wchar_t* path) {
         return 0;
     }
     CloseHandle(file);
-    if (head[0] != 'M' || head[1] != 'Z') return 0;
+    if (head[0] != 'M' || head[1] != 'Z') {
+        return 0;
+    }
     DWORD e_lfanew = *(DWORD*)(head + 0x3C);
-    if (e_lfanew + 0x60 > got) return 0;
-    if (head[e_lfanew] != 'P' || head[e_lfanew + 1] != 'E') return 0;
+    if (e_lfanew + 0x60 > got) {
+        return 0;
+    }
+    if (head[e_lfanew] != 'P' || head[e_lfanew + 1] != 'E') {
+        return 0;
+    }
     DWORD magic = *(WORD*)(head + e_lfanew + 24);
     uintptr_t base;
     if (magic == 0x20B) {
@@ -149,16 +158,26 @@ static uintptr_t ReadImageBaseFromFile(const wchar_t* path) {
 
 // Confirm a candidate base is a loaded PE image whose size covers the fault.
 static bool LooksLikeImageBase(uintptr_t base, uintptr_t fault) {
-    if (!base) return false;
+    if (!base) {
+        return false;
+    }
     const unsigned char* p = (const unsigned char*)base;
-    if (p[0] != 'M' || p[1] != 'Z') return false;
+    if (p[0] != 'M' || p[1] != 'Z') {
+        return false;
+    }
     DWORD e_lfanew = *(DWORD*)(p + 0x3C);
-    if (!e_lfanew || e_lfanew >= 0x1000) return false;
-    if (p[e_lfanew] != 'P' || p[e_lfanew + 1] != 'E') return false;
+    if (!e_lfanew || e_lfanew >= 0x1000) {
+        return false;
+    }
+    if (p[e_lfanew] != 'P' || p[e_lfanew + 1] != 'E') {
+        return false;
+    }
     DWORD magic = *(WORD*)(p + e_lfanew + 24);
-    uintptr_t sizeOfImage = (magic == 0x20B) ? *(uint32_t*)(p + e_lfanew + 24 + 56)
-                                             : *(uint32_t*)(p + e_lfanew + 24 + 56);
-    if (base + sizeOfImage > fault) return true;
+    uintptr_t sizeOfImage =
+        (magic == 0x20B) ? *(uint32_t*)(p + e_lfanew + 24 + 56) : *(uint32_t*)(p + e_lfanew + 24 + 56);
+    if (base + sizeOfImage > fault) {
+        return true;
+    }
     return false;
 }
 
@@ -169,7 +188,9 @@ static uintptr_t BaseFromFault(uintptr_t fault) {
     // Fall back to walking down to the image header.
     uintptr_t base = fault & ~0xFFFFFull;
     for (int i = 0; i < 0x2000; ++i, base -= 0x1000) {
-        if (base < 0x10000) break;
+        if (base < 0x10000) {
+            break;
+        }
         if (LooksLikeImageBase(base, fault)) {
             return base;
         }
@@ -177,11 +198,11 @@ static uintptr_t BaseFromFault(uintptr_t fault) {
     return 0;
 }
 
-// In-process replica of the injector's arena publish. The injector waits for the
+// In-process replica of the out-of-process arena publish that used to ship with
 // measured instruction bytes to appear at Referee+BootstrapInstruction and for
 // the pointer slot to be initialized, then writes the arena BEFORE the
 // protector's first read. The module list is populated before the protector's
-// DllMain runs, so the external injector gets the whole of that DllMain as
+// DllMain runs, so an external watcher gets the whole of that DllMain as
 // head start; this thread gets the same head start because it starts before
 // LoadLibrary returns.
 // The log file is opened once and kept open. A vectored handler must not
@@ -193,7 +214,7 @@ static HANDLE g_logHandle = INVALID_HANDLE_VALUE;
 //
 // The protector builds arena addresses as "arena base + offset" and caches them. Its
 // first arena read happens after it has already cached a batch of them, and because the
-// base was still NULL those cached values are the bare offsets. The classic injector
+// base was still NULL those cached values are the bare offsets. The external watcher
 // avoids this by publishing the arena before the protector's DllMain reads anything.
 //
 // In-process we cannot run concurrently with the protector's DllMain (the loader lock
@@ -213,10 +234,14 @@ static volatile LONG g_cachedOffsets[kMaxCachedOffsets];
 static volatile LONG g_cachedOffsetCount = 0;
 
 static void QueueCachedOffset(uintptr_t offset) {
-    if (!offset || offset >= kArenaSize) return;
+    if (!offset || offset >= kArenaSize) {
+        return;
+    }
     const LONG value = static_cast<LONG>(offset + 1);
     for (LONG i = 0; i < g_cachedOffsetCount; ++i) {
-        if (g_cachedOffsets[i] == value) return;
+        if (g_cachedOffsets[i] == value) {
+            return;
+        }
     }
     for (LONG i = 0; i < kMaxCachedOffsets; ++i) {
         LONG expected = 0;
@@ -245,7 +270,9 @@ static unsigned ScanChunkForStaleOffsets(LPVOID address, size_t length, unsigned
         for (size_t i = 0; i + 8 <= length; i += 8) {
             uintptr_t value = 0;
             memcpy(&value, buffer + i, sizeof(value));
-            if (!value) continue;
+            if (!value) {
+                continue;
+            }
 
             // Only rewrite a value that is part of the protector's pointer
             // TABLE. The table holds several stale arena offsets next to each
@@ -258,10 +285,14 @@ static unsigned ScanChunkForStaleOffsets(LPVOID address, size_t length, unsigned
                 const size_t neighbours[2] = {i >= step * 8 ? i - step * 8 : (size_t)-1,
                                               i + step * 8 < length ? i + step * 8 : (size_t)-1};
                 for (size_t n = 0; n < 2 && !inTable; ++n) {
-                    if (neighbours[n] == (size_t)-1) continue;
+                    if (neighbours[n] == (size_t)-1) {
+                        continue;
+                    }
                     uintptr_t other = 0;
                     memcpy(&other, buffer + neighbours[n], sizeof(other));
-                    if (!other) continue;
+                    if (!other) {
+                        continue;
+                    }
                     for (size_t p = 0; p < g_scanPendingCount; ++p) {
                         const uintptr_t stale = static_cast<uintptr_t>(g_cachedOffsets[p]) - 1;
                         if (other == stale || other == g_scanArena + stale) {
@@ -271,11 +302,15 @@ static unsigned ScanChunkForStaleOffsets(LPVOID address, size_t length, unsigned
                     }
                 }
             }
-            if (!inTable) continue;
+            if (!inTable) {
+                continue;
+            }
 
             for (size_t p = 0; p < g_scanPendingCount; ++p) {
                 const uintptr_t stale = static_cast<uintptr_t>(g_cachedOffsets[p]) - 1;
-                if (value != stale) continue;
+                if (value != stale) {
+                    continue;
+                }
                 const uintptr_t replacement = g_scanArena + stale;
                 memcpy(buffer + i, &replacement, sizeof(replacement));
                 ++patched;
@@ -294,11 +329,14 @@ static unsigned ScanChunkForStaleOffsets(LPVOID address, size_t length, unsigned
 
 // Rewrite every quadword in the protector's writable memory that holds a stale offset.
 static DWORD WINAPI CachedOffsetPatchThread(LPVOID) {
-    struct Region { uintptr_t base; size_t size; };
+    struct Region {
+        uintptr_t base;
+        size_t size;
+    };
     std::vector<Region> regions;
     const size_t chunk = 4 * 1024 * 1024;
-    unsigned char* buffer = (unsigned char*)VirtualAlloc(nullptr, chunk, MEM_COMMIT | MEM_RESERVE,
-                                                          PAGE_READWRITE);
+    unsigned char* buffer =
+        (unsigned char*)VirtualAlloc(nullptr, chunk, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     LONG handled = 0;
     ULONGLONG lastPass = 0;
     for (;;) {
@@ -307,7 +345,9 @@ static DWORD WINAPI CachedOffsetPatchThread(LPVOID) {
         while (handled < count && pendingCount < kMaxCachedOffsets) {
             const LONG value = g_cachedOffsets[handled];
             ++handled;
-            if (value <= 0) continue;
+            if (value <= 0) {
+                continue;
+            }
             ++pendingCount;
         }
         // Scan again even without new offsets: the protector keeps producing
@@ -327,10 +367,14 @@ static DWORD WINAPI CachedOffsetPatchThread(LPVOID) {
         MEMORY_BASIC_INFORMATION mbi{};
         uintptr_t address = 0;
         while (address < 0x7FFFFFFFFFFF && regions.size() < 8192) {
-            if (!VirtualQuery((LPCVOID)address, &mbi, sizeof(mbi))) break;
-            if (!mbi.RegionSize) break;
-            const bool writable = (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY |
-                                                  PAGE_EXECUTE_READWRITE)) != 0;
+            if (!VirtualQuery((LPCVOID)address, &mbi, sizeof(mbi))) {
+                break;
+            }
+            if (!mbi.RegionSize) {
+                break;
+            }
+            const bool writable =
+                (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE)) != 0;
             // A guard page raises STATUS_GUARD_PAGE_VIOLATION when it is read,
             // which would end this thread (and with it the process).
             const bool guarded = (mbi.Protect & PAGE_GUARD) != 0;
@@ -341,15 +385,19 @@ static DWORD WINAPI CachedOffsetPatchThread(LPVOID) {
             address = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
         }
         size_t totalBytes = 0;
-        for (const Region& region : regions) totalBytes += region.size;
+        for (const Region& region : regions) {
+            totalBytes += region.size;
+        }
 
         const uintptr_t arena = g_arena;
-        if (!arena || !buffer || !g_cachedOffsetCount) continue;
+        if (!arena || !buffer || !g_cachedOffsetCount) {
+            continue;
+        }
 
         unsigned patched = 0;
         g_scanArena = arena;
-        g_scanPendingCount = g_cachedOffsetCount > kMaxCachedOffsets ? kMaxCachedOffsets
-                                                                     : g_cachedOffsetCount;
+        g_scanPendingCount =
+            g_cachedOffsetCount > kMaxCachedOffsets ? kMaxCachedOffsets : g_cachedOffsetCount;
         for (size_t r = 0; r < regions.size(); ++r) {
             const Region& region = regions[r];
             for (size_t start = 0; start < region.size; start += chunk) {
@@ -358,8 +406,8 @@ static DWORD WINAPI CachedOffsetPatchThread(LPVOID) {
             }
         }
         if (patched) {
-            Log("cached-offset patcher: %u cached pointers rewritten across %zu regions (%zu bytes)",
-                patched, regions.size(), totalBytes);
+            Log("cached-offset patcher: %u cached pointers rewritten across %zu regions (%zu bytes)", patched,
+                regions.size(), totalBytes);
         }
     }
     return 0;
@@ -368,7 +416,9 @@ static DWORD WINAPI CachedOffsetPatchThread(LPVOID) {
 // Append raw bytes to the log. No CRT, no allocation: safe inside a vectored
 // exception handler.
 static void AppendRaw(const char* text, size_t length) {
-    if (g_logHandle == INVALID_HANDLE_VALUE) return;
+    if (g_logHandle == INVALID_HANDLE_VALUE) {
+        return;
+    }
     DWORD written = 0;
     WriteFile(g_logHandle, text, static_cast<DWORD>(length), &written, nullptr);
 }
@@ -405,48 +455,9 @@ static bool ShouldReportFault(uintptr_t rip) {
     return count <= 3;
 }
 
-// Write one compact fault line straight to the log file.
-static void WriteFaultLine(const char* tag, EXCEPTION_POINTERS* ep) {
-    if (!ShouldReportFault((uintptr_t)ep->ContextRecord->Rip)) {
-        return;
-    }
-    char line[512];
-    size_t used = 0;
-    const char* prefix = tag;
-    while (*prefix && used + 1 < sizeof(line)) line[used++] = *prefix++;
-    static const char* kNames[] = {" rip=", " target=", " access=", " rax=", " rbx=", " rcx=",
-                                   " rdx=", " rsi=", " rdi=", " r8=",  " r9=",  " r10=",
-                                   " r11=", " r12=", " r13=", " r14=", " r15="};
-    const unsigned long long values[] = {
-        (unsigned long long)ep->ContextRecord->Rip,
-        (unsigned long long)ep->ExceptionRecord->ExceptionInformation[1],
-        (unsigned long long)ep->ExceptionRecord->ExceptionInformation[0],
-        (unsigned long long)ep->ContextRecord->Rax,
-        (unsigned long long)ep->ContextRecord->Rbx,
-        (unsigned long long)ep->ContextRecord->Rcx,
-        (unsigned long long)ep->ContextRecord->Rdx,
-        (unsigned long long)ep->ContextRecord->Rsi,
-        (unsigned long long)ep->ContextRecord->Rdi,
-        (unsigned long long)ep->ContextRecord->R8,
-        (unsigned long long)ep->ContextRecord->R9,
-        (unsigned long long)ep->ContextRecord->R10,
-        (unsigned long long)ep->ContextRecord->R11,
-        (unsigned long long)ep->ContextRecord->R12,
-        (unsigned long long)ep->ContextRecord->R13,
-        (unsigned long long)ep->ContextRecord->R14,
-        (unsigned long long)ep->ContextRecord->R15,
-    };
-    for (int f = 0; f < 17; ++f) {
-        const char* text = kNames[f];
-        while (*text && used + 1 < sizeof(line)) line[used++] = *text++;
-        used += FormatHex(line + used, sizeof(line) - used, values[f]);
-    }
-    if (used + 2 < sizeof(line)) {
-        line[used++] = '\r';
-        line[used++] = '\n';
-    }
-    AppendRaw(line, used);
-}
+// WriteFaultLine was the first diagnostic: one raw line per fault, straight to the
+// file. It was too slow inside a vectored handler and was replaced by the ring buffer
+// plus the fault log thread. The code is gone; keep it gone.
 
 // Defined with the fault recorder further down; the handler only copies into
 // the ring buffer.
@@ -471,8 +482,8 @@ static LONG CALLBACK CrashWatch(EXCEPTION_POINTERS* ep);
 // =================================================================================================
 
 struct MemoryOperand {
-    int base = -1;       // register number, or -1 when there is none
-    int index = -1;      // register number, or -1 when there is none
+    int base = -1;  // register number, or -1 when there is none
+    int index = -1; // register number, or -1 when there is none
     int scale = 1;
     long long displacement = 0;
     bool valid = false;
@@ -482,83 +493,139 @@ struct MemoryOperand {
 // 6=rsi 7=rdi 8..15=r8..r15.
 static DWORD64* RegisterByNumber(CONTEXT* context, int number) {
     switch (number) {
-    case 0: return &context->Rax;
-    case 1: return &context->Rcx;
-    case 2: return &context->Rdx;
-    case 3: return &context->Rbx;
-    case 4: return &context->Rsp;
-    case 5: return &context->Rbp;
-    case 6: return &context->Rsi;
-    case 7: return &context->Rdi;
-    case 8: return &context->R8;
-    case 9: return &context->R9;
-    case 10: return &context->R10;
-    case 11: return &context->R11;
-    case 12: return &context->R12;
-    case 13: return &context->R13;
-    case 14: return &context->R14;
-    case 15: return &context->R15;
-    default: return nullptr;
+    case 0:
+        return &context->Rax;
+    case 1:
+        return &context->Rcx;
+    case 2:
+        return &context->Rdx;
+    case 3:
+        return &context->Rbx;
+    case 4:
+        return &context->Rsp;
+    case 5:
+        return &context->Rbp;
+    case 6:
+        return &context->Rsi;
+    case 7:
+        return &context->Rdi;
+    case 8:
+        return &context->R8;
+    case 9:
+        return &context->R9;
+    case 10:
+        return &context->R10;
+    case 11:
+        return &context->R11;
+    case 12:
+        return &context->R12;
+    case 13:
+        return &context->R13;
+    case 14:
+        return &context->R14;
+    case 15:
+        return &context->R15;
+    default:
+        return nullptr;
     }
 }
 
 static bool OpcodeHasModRM(unsigned char opcode) {
-    if (opcode >= 0x50 && opcode <= 0x6F) return false;   // push/pop/ins/outs
-    if (opcode >= 0x70 && opcode <= 0x7F) return false;   // jcc rel8
-    if (opcode >= 0x90 && opcode <= 0x9F) return false;   // xchg/callf/jmpf
-    if (opcode >= 0xA0 && opcode <= 0xBF) return false;   // mov moffs, test imm, string ops
-    if (opcode == 0xC2 || opcode == 0xC3) return false;   // ret
-    if (opcode >= 0xC8 && opcode <= 0xCF) return false;   // enter/leave/iret
-    if (opcode == 0xD4 || opcode == 0xD5) return false;   // aam/aad
-    if (opcode == 0xD6 || opcode == 0xD7) return false;   // xlat, salc
-    if (opcode >= 0xE0 && opcode <= 0xEF) return false;   // loop/jcc/call/jmp
-    if (opcode == 0xF1 || opcode == 0xF4 || opcode == 0xF5) return false;
-    if (opcode >= 0xF8 && opcode <= 0xFD) return false;
-    if (opcode <= 0x3F && (opcode & 7) >= 6) return false;  // the six/seven forms
+    if (opcode >= 0x50 && opcode <= 0x6F) {
+        return false; // push/pop/ins/outs
+    }
+    if (opcode >= 0x70 && opcode <= 0x7F) {
+        return false; // jcc rel8
+    }
+    if (opcode >= 0x90 && opcode <= 0x9F) {
+        return false; // xchg/callf/jmpf
+    }
+    if (opcode >= 0xA0 && opcode <= 0xBF) {
+        return false; // mov moffs, test imm, string ops
+    }
+    if (opcode == 0xC2 || opcode == 0xC3) {
+        return false; // ret
+    }
+    if (opcode >= 0xC8 && opcode <= 0xCF) {
+        return false; // enter/leave/iret
+    }
+    if (opcode == 0xD4 || opcode == 0xD5) {
+        return false; // aam/aad
+    }
+    if (opcode == 0xD6 || opcode == 0xD7) {
+        return false; // xlat, salc
+    }
+    if (opcode >= 0xE0 && opcode <= 0xEF) {
+        return false; // loop/jcc/call/jmp
+    }
+    if (opcode == 0xF1 || opcode == 0xF4 || opcode == 0xF5) {
+        return false;
+    }
+    if (opcode >= 0xF8 && opcode <= 0xFD) {
+        return false;
+    }
+    if (opcode <= 0x3F && (opcode & 7) >= 6) {
+        return false; // the six/seven forms
+    }
     return true;
 }
 
 // Decode the memory operand of the instruction at `code`. Returns false when the
 // instruction has no memory operand or cannot be decoded.
-static bool DecodeMemoryOperand(const unsigned char* code, size_t length,
-                                 MemoryOperand& operand) {
+static bool DecodeMemoryOperand(const unsigned char* code, size_t length, MemoryOperand& operand) {
     operand = MemoryOperand{};
-    if (!code || length < 2) return false;
+    if (!code || length < 2) {
+        return false;
+    }
 
     size_t i = 0;
     int rex = 0;
     while (i < length) {
         const unsigned char b = code[i];
-        const bool prefix = b == 0xF0 || b == 0xF2 || b == 0xF3 || b == 0x2E || b == 0x36 ||
-                            b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65 || b == 0x66;
-        if (!prefix) break;
+        const bool prefix = b == 0xF0 || b == 0xF2 || b == 0xF3 || b == 0x2E || b == 0x36 || b == 0x3E ||
+                            b == 0x26 || b == 0x64 || b == 0x65 || b == 0x66;
+        if (!prefix) {
+            break;
+        }
         ++i;
     }
     if (i < length && code[i] >= 0x40 && code[i] <= 0x4F) {
         rex = code[i];
         ++i;
     }
-    if (i >= length) return false;
+    if (i >= length) {
+        return false;
+    }
 
     const unsigned char opcode = code[i++];
     if (opcode == 0x0F) {
-        if (i >= length) return false;
+        if (i >= length) {
+            return false;
+        }
         const unsigned char second = code[i++];
-        if (second >= 0x80 && second <= 0x8F) return false;   // jcc rel32 has no ModRM
+        if (second >= 0x80 && second <= 0x8F) {
+            return false; // jcc rel32 has no ModRM
+        }
     } else if (opcode >= 0x40 && opcode <= 0x4F) {
-        return false;                                          // inc/dec r64
+        return false; // inc/dec r64
     } else if (!OpcodeHasModRM(opcode)) {
         return false;
     }
-    if (i >= length) return false;
+    if (i >= length) {
+        return false;
+    }
 
     const unsigned char modrm = code[i++];
     const int mod = modrm >> 6;
     const int rm = modrm & 7;
-    if (mod == 3) return false;                                // register operand
+    if (mod == 3) {
+        return false; // register operand
+    }
 
     if (rm == 4) {
-        if (i >= length) return false;
+        if (i >= length) {
+            return false;
+        }
         const unsigned char sib = code[i++];
         operand.scale = 1 << ((sib >> 6) & 3);
         const int index = (sib >> 3) & 7;
@@ -568,7 +635,9 @@ static bool DecodeMemoryOperand(const unsigned char* code, size_t length,
         }
         if (base == 5 && mod == 0) {
             // No base register: the address is disp32.
-            if (i + 4 > length) return false;
+            if (i + 4 > length) {
+                return false;
+            }
             int32_t disp = 0;
             memcpy(&disp, code + i, 4);
             operand.displacement = disp;
@@ -586,11 +655,15 @@ static bool DecodeMemoryOperand(const unsigned char* code, size_t length,
     }
 
     if (mod == 1) {
-        if (i >= length) return false;
+        if (i >= length) {
+            return false;
+        }
         operand.displacement = static_cast<signed char>(code[i]);
         ++i;
     } else if (mod == 2) {
-        if (i + 4 > length) return false;
+        if (i + 4 > length) {
+            return false;
+        }
         int32_t disp = 0;
         memcpy(&disp, code + i, 4);
         operand.displacement = disp;
@@ -670,10 +743,9 @@ static LONG CALLBACK ArenaFaultHandler(EXCEPTION_POINTERS* ep) {
     // The second shape is why the relocation works on the register that holds
     // the stale base rather than on the register that holds the fault target.
     DWORD64* registers[] = {
-        &ep->ContextRecord->Rax, &ep->ContextRecord->Rbx, &ep->ContextRecord->Rcx,
-        &ep->ContextRecord->Rdx, &ep->ContextRecord->Rsi, &ep->ContextRecord->Rdi,
-        &ep->ContextRecord->R8,  &ep->ContextRecord->R9,  &ep->ContextRecord->R10,
-        &ep->ContextRecord->R11, &ep->ContextRecord->R12, &ep->ContextRecord->R13,
+        &ep->ContextRecord->Rax, &ep->ContextRecord->Rbx, &ep->ContextRecord->Rcx, &ep->ContextRecord->Rdx,
+        &ep->ContextRecord->Rsi, &ep->ContextRecord->Rdi, &ep->ContextRecord->R8,  &ep->ContextRecord->R9,
+        &ep->ContextRecord->R10, &ep->ContextRecord->R11, &ep->ContextRecord->R12, &ep->ContextRecord->R13,
         &ep->ContextRecord->R14, &ep->ContextRecord->R15,
     };
     unsigned relocated = 0;
@@ -699,17 +771,19 @@ static LONG CALLBACK ArenaFaultHandler(EXCEPTION_POINTERS* ep) {
         // address exactly.
         unsigned char instruction[16] = {};
         SIZE_T read = 0;
-        ReadProcessMemory(GetCurrentProcess(), (LPCVOID)fault, instruction, sizeof(instruction),
-                          &read);
+        ReadProcessMemory(GetCurrentProcess(), (LPCVOID)fault, instruction, sizeof(instruction), &read);
         MemoryOperand operand;
         if (read >= 2 && DecodeMemoryOperand(instruction, (size_t)read, operand)) {
-            DWORD64* base = operand.base >= 0 ? RegisterByNumber(ep->ContextRecord, operand.base)
-                                              : nullptr;
-            DWORD64* index = operand.index >= 0 ? RegisterByNumber(ep->ContextRecord, operand.index)
-                                                : nullptr;
+            DWORD64* base = operand.base >= 0 ? RegisterByNumber(ep->ContextRecord, operand.base) : nullptr;
+            DWORD64* index =
+                operand.index >= 0 ? RegisterByNumber(ep->ContextRecord, operand.index) : nullptr;
             uintptr_t effective = 0;
-            if (base) effective += (uintptr_t)*base;
-            if (index) effective += (uintptr_t)*index * (uintptr_t)operand.scale;
+            if (base) {
+                effective += (uintptr_t)*base;
+            }
+            if (index) {
+                effective += (uintptr_t)*index * (uintptr_t)operand.scale;
+            }
             effective += (uintptr_t)operand.displacement;
             if (effective == target) {
                 // Both candidates may hold a stale offset. The stale one is the
@@ -720,8 +794,8 @@ static LONG CALLBACK ArenaFaultHandler(EXCEPTION_POINTERS* ep) {
                 const uintptr_t baseValue = base ? (uintptr_t)*base : 0;
                 const uintptr_t indexValue = index ? (uintptr_t)*index : 0;
                 const bool baseIsStale = base && baseValue > 0 && baseValue < kArenaSize;
-                const bool indexIsStale = index && operand.scale == 1 && indexValue > 0 &&
-                                          indexValue < kArenaSize;
+                const bool indexIsStale =
+                    index && operand.scale == 1 && indexValue > 0 && indexValue < kArenaSize;
                 DWORD64* chosen = nullptr;
                 if (baseIsStale && indexIsStale) {
                     chosen = baseValue >= indexValue ? base : index;
@@ -777,7 +851,9 @@ static LONG CALLBACK ArenaFaultHandler(EXCEPTION_POINTERS* ep) {
         char queued[64]{};
         size_t used = 0;
         const char* label = "queued=";
-        while (*label && used + 1 < sizeof(queued)) queued[used++] = *label++;
+        while (*label && used + 1 < sizeof(queued)) {
+            queued[used++] = *label++;
+        }
         used += FormatHex(queued + used, sizeof(queued) - used, relocatedFrom);
         if (used + 2 < sizeof(queued)) {
             queued[used++] = '\r';
@@ -799,7 +875,7 @@ static LONG CALLBACK ArenaFaultHandler(EXCEPTION_POINTERS* ep) {
 // =================================================================================================
 
 struct FaultRecord {
-    volatile LONG sequence;     // published last; readers wait for it to change
+    volatile LONG sequence; // published last; readers wait for it to change
     uintptr_t rip;
     uintptr_t target;
     uint64_t access;
@@ -841,8 +917,7 @@ static void RecordFault(const char* tag, EXCEPTION_POINTERS* ep) {
     record.registers[14] = (uint64_t)ep->ContextRecord->Rsp;
     record.registers[15] = (uint64_t)ep->ContextRecord->Rbp;
     SIZE_T read = 0;
-    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)record.rip, record.code, sizeof(record.code),
-                      &read);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)record.rip, record.code, sizeof(record.code), &read);
     if (read < sizeof(record.code)) {
         memset(record.code + read, 0, sizeof(record.code) - read);
     }
@@ -853,10 +928,12 @@ static void RecordFault(const char* tag, EXCEPTION_POINTERS* ep) {
     char line[512];
     size_t used = 0;
     const char* prefix = tag;
-    while (*prefix && used + 1 < sizeof(line)) line[used++] = *prefix++;
-    static const char* kNames[] = {" rip=", " target=", " access=", " rax=", " rbx=", " rcx=",
-                                   " rdx=", " rsi=", " rdi=", " r8=",  " r9=",  " r10=",
-                                   " r11=", " r12=", " r13=", " r14=", " r15="};
+    while (*prefix && used + 1 < sizeof(line)) {
+        line[used++] = *prefix++;
+    }
+    static const char* kNames[] = {
+        " rip=", " target=", " access=", " rax=", " rbx=", " rcx=", " rdx=", " rsi=", " rdi=",
+        " r8=",  " r9=",     " r10=",    " r11=", " r12=", " r13=", " r14=", " r15="};
     const unsigned long long values[] = {
         (unsigned long long)ep->ContextRecord->Rip,
         (unsigned long long)ep->ExceptionRecord->ExceptionInformation[1],
@@ -878,7 +955,9 @@ static void RecordFault(const char* tag, EXCEPTION_POINTERS* ep) {
     };
     for (int f = 0; f < 17; ++f) {
         const char* text = kNames[f];
-        while (*text && used + 1 < sizeof(line)) line[used++] = *text++;
+        while (*text && used + 1 < sizeof(line)) {
+            line[used++] = *text++;
+        }
         used += FormatHex(line + used, sizeof(line) - used, values[f]);
     }
     if (used + 2 < sizeof(line)) {
@@ -905,18 +984,23 @@ static DWORD WINAPI FaultLogThread(LPVOID) {
         bool wrote = false;
         for (;;) {
             const LONG writeIndex = g_faultWrite;
-            if (writeIndex == lastSeen) break;
+            if (writeIndex == lastSeen) {
+                break;
+            }
             const long index = (long)(writeIndex - 1);
-            FaultRecord& record =
-                g_faults[((index % kFaultRingSize) + kFaultRingSize) % kFaultRingSize];
+            FaultRecord& record = g_faults[((index % kFaultRingSize) + kFaultRingSize) % kFaultRingSize];
             const LONG sequence = record.sequence;
-            if (sequence != index + 1) break;   // still being written
+            if (sequence != index + 1) {
+                break; // still being written
+            }
             // Copy the record out, then confirm it was not overwritten while it
             // was being copied. The fault rate here is high enough that the
             // writer can lap the reader, and a torn record mixes one fault's
             // registers with another fault's instruction bytes.
             FaultRecord copy = record;
-            if (record.sequence != sequence) continue;
+            if (record.sequence != sequence) {
+                continue;
+            }
             lastSeen = index + 1;
 
             char code[80]{};
@@ -925,22 +1009,21 @@ static DWORD WINAPI FaultLogThread(LPVOID) {
             for (size_t i = 0; i < sizeof(copy.code) && used < sizeof(code) - 4; ++i) {
                 used += (size_t)snprintf(code + used, sizeof(code) - used, " %02X", copy.code[i]);
             }
-            Log("%s: rip=0x%llX target=0x%llX access=%llu%s", copy.tag,
-                (unsigned long long)copy.rip, (unsigned long long)copy.target,
-                (unsigned long long)copy.access, code);
-            Log("%s: rax=0x%llX rbx=0x%llX rcx=0x%llX rdx=0x%llX rsi=0x%llX rdi=0x%llX",
-                copy.tag, (unsigned long long)copy.registers[0],
-                (unsigned long long)copy.registers[1], (unsigned long long)copy.registers[2],
-                (unsigned long long)copy.registers[3], (unsigned long long)copy.registers[4],
-                (unsigned long long)copy.registers[5]);
-            Log("%s: r8=0x%llX r9=0x%llX r10=0x%llX r11=0x%llX r12=0x%llX r13=0x%llX",
-                copy.tag, (unsigned long long)copy.registers[6],
-                (unsigned long long)copy.registers[7], (unsigned long long)copy.registers[8],
-                (unsigned long long)copy.registers[9], (unsigned long long)copy.registers[10],
-                (unsigned long long)copy.registers[11]);
+            Log("%s: rip=0x%llX target=0x%llX access=%llu%s", copy.tag, (unsigned long long)copy.rip,
+                (unsigned long long)copy.target, (unsigned long long)copy.access, code);
+            Log("%s: rax=0x%llX rbx=0x%llX rcx=0x%llX rdx=0x%llX rsi=0x%llX rdi=0x%llX", copy.tag,
+                (unsigned long long)copy.registers[0], (unsigned long long)copy.registers[1],
+                (unsigned long long)copy.registers[2], (unsigned long long)copy.registers[3],
+                (unsigned long long)copy.registers[4], (unsigned long long)copy.registers[5]);
+            Log("%s: r8=0x%llX r9=0x%llX r10=0x%llX r11=0x%llX r12=0x%llX r13=0x%llX", copy.tag,
+                (unsigned long long)copy.registers[6], (unsigned long long)copy.registers[7],
+                (unsigned long long)copy.registers[8], (unsigned long long)copy.registers[9],
+                (unsigned long long)copy.registers[10], (unsigned long long)copy.registers[11]);
             wrote = true;
         }
-        if (!wrote) Sleep(5);
+        if (!wrote) {
+            Sleep(5);
+        }
     }
     return 0;
 }
@@ -963,16 +1046,24 @@ static LONG CALLBACK CrashWatch(EXCEPTION_POINTERS* ep) {
 // Find the real protector's module. The proxy itself is also called
 // "Referee.dll", so the module list has to be walked and matched by path.
 static uintptr_t FindProtectorModule() {
-    if (g_protectorBase) return g_protectorBase;
+    if (g_protectorBase) {
+        return g_protectorBase;
+    }
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
-    if (snap == INVALID_HANDLE_VALUE) return 0;
+    if (snap == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
     MODULEENTRY32W mod{};
     mod.dwSize = sizeof(mod);
     uintptr_t found = 0;
     if (Module32FirstW(snap, &mod)) {
         do {
-            if (_wcsicmp(mod.szModule, L"Referee.dll") != 0) continue;
-            if (wcsstr(mod.szExePath, L"preserve\\") == nullptr) continue;
+            if (_wcsicmp(mod.szModule, L"Referee.dll") != 0) {
+                continue;
+            }
+            if (wcsstr(mod.szExePath, L"preserve\\") == nullptr) {
+                continue;
+            }
             found = (uintptr_t)mod.modBaseAddr;
             break;
         } while (Module32NextW(snap, &mod));
@@ -985,7 +1076,7 @@ static uintptr_t FindProtectorModule() {
 // ARENA SLOT WATCHPOINT
 //
 // The protector keeps its arena pointer in a local variable and stores the ADDRESS of
-// that local in the slot at Referee+ArenaSlot. The external injector therefore writes
+// that local in the slot at Referee+ArenaSlot. The out-of-process publisher therefore writes
 // the arena straight into the protector's own stack frame, and it does so between the
 // store and the protector's first read of that frame.
 //
@@ -1017,10 +1108,14 @@ static void ArmArenaWatchpoint(uintptr_t slot) {
         entry.dwSize = sizeof(entry);
         if (Thread32First(snapshot, &entry)) {
             do {
-                if (entry.th32ThreadID == currentThread) continue;
+                if (entry.th32ThreadID == currentThread) {
+                    continue;
+                }
                 HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_QUERY_INFORMATION,
                                            FALSE, entry.th32ThreadID);
-                if (!thread) continue;
+                if (!thread) {
+                    continue;
+                }
                 CONTEXT context{};
                 context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
                 if (GetThreadContext(thread, &context)) {
@@ -1052,7 +1147,9 @@ static void ArmArenaWatchpoint(uintptr_t slot) {
 }
 
 static void DisarmArenaWatchpoint() {
-    if (!g_watchedSlot) return;
+    if (!g_watchedSlot) {
+        return;
+    }
     CONTEXT context{};
     context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
     if (GetThreadContext(GetCurrentThread(), &context)) {
@@ -1088,8 +1185,7 @@ static LONG HandleArenaWatchpoint(EXCEPTION_POINTERS* ep) {
     }
     if (pointer) {
         *(uintptr_t*)pointer = arena;
-        Log("watchpoint: arena %p published into the protector's frame at %p", (void*)arena,
-            (void*)pointer);
+        Log("watchpoint: arena %p published into the protector's frame at %p", (void*)arena, (void*)pointer);
     } else {
         Log("watchpoint: slot holds a null address");
     }
@@ -1104,7 +1200,9 @@ static LONG HandleArenaWatchpoint(EXCEPTION_POINTERS* ep) {
 // wait is the gate appearing. A bounded retry would leave the trampoline
 // jumping to a null address, which is a worse failure than a wait.
 extern "C" bool EnsureGate(void) {
-    if (g_realXNfn) return true;
+    if (g_realXNfn) {
+        return true;
+    }
     uintptr_t base = FindProtectorModule();
     if (!base) {
         static int reported = 0;
@@ -1157,10 +1255,9 @@ static DWORD WINAPI BootstrapThread(LPVOID) {
                 } while (FindNextFileW(search, &fd));
                 FindClose(search);
             }
-            std::sort(modules.begin(), modules.end(),
-                      [](const std::wstring& a, const std::wstring& b) {
-                          return _wcsicmp(a.c_str(), b.c_str()) < 0;
-                      });
+            std::sort(modules.begin(), modules.end(), [](const std::wstring& a, const std::wstring& b) {
+                return _wcsicmp(a.c_str(), b.c_str()) < 0;
+            });
 
             if (modules.empty()) {
                 Log("no modules found in %ls; client is running unpatched", modulesDir.c_str());
@@ -1188,7 +1285,9 @@ static void GetModuleDir(HMODULE module, wchar_t* out, size_t outCount) {
     wchar_t path[MAX_PATH] = {};
     GetModuleFileNameW(module, path, MAX_PATH);
     wchar_t* slash = wcsrchr(path, L'\\');
-    if (slash) *slash = L'\0';
+    if (slash) {
+        *slash = L'\0';
+    }
     wcsncpy_s(out, outCount, path, _TRUNCATE);
 }
 
@@ -1205,7 +1304,9 @@ static void Log(const char* fmt, ...) {
     // per thread so that the fault reporter and the repair worker can log at
     // the same time instead of dropping each other's lines.
     static __declspec(thread) LONG busy = 0;
-    if (_InterlockedCompareExchange(&busy, 1, 0) != 0) return;
+    if (_InterlockedCompareExchange(&busy, 1, 0) != 0) {
+        return;
+    }
 
     char line[1024]{};
     va_list args;
@@ -1220,8 +1321,7 @@ static void Log(const char* fmt, ...) {
     SYSTEMTIME st;
     GetLocalTime(&st);
     char stamp[32]{};
-    _snprintf_s(stamp, _countof(stamp), _TRUNCATE, "[%02d:%02d:%02d] ", st.wHour, st.wMinute,
-                st.wSecond);
+    _snprintf_s(stamp, _countof(stamp), _TRUNCATE, "[%02d:%02d:%02d] ", st.wHour, st.wMinute, st.wSecond);
 
     // No heap and no CRT allocation here: this runs inside a vectored exception
     // handler, where an allocation can fault or deadlock on the CRT lock and
@@ -1237,15 +1337,19 @@ static void Log(const char* fmt, ...) {
 // Open the log file once. Keeping the handle open means a fault handler never
 // has to resolve a path or open a file.
 static void OpenLogFile() {
-    if (g_logHandle != INVALID_HANDLE_VALUE) return;
+    if (g_logHandle != INVALID_HANDLE_VALUE) {
+        return;
+    }
     wchar_t dir[MAX_PATH]{};
     GetModuleFileNameW(nullptr, dir, MAX_PATH);
     wchar_t* slash = wcsrchr(dir, L'\\');
-    if (slash) *slash = L'\0';
+    if (slash) {
+        *slash = L'\0';
+    }
     wchar_t logPath[MAX_PATH + 80]{};
     _snwprintf_s(logPath, _countof(logPath), _TRUNCATE, L"%s\\preserve-loader.log", dir);
-    g_logHandle = CreateFileW(logPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    g_logHandle = CreateFileW(logPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 }
 
 BOOL WINAPI DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
@@ -1274,7 +1378,7 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
         // Build the arena up front and watch the slot the protector uses to
         // publish the address of its own arena variable. The watchpoint closes
         // the window between that store and the protector's first read, which
-        // is the same window the external injector uses. Without it the
+        // is the same window the out-of-process publisher used. Without it the
         // protector derives its arena offsets from a null base and the client
         // never reaches a consistent state.
         {

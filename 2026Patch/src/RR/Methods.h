@@ -136,7 +136,7 @@ namespace RR::Methods::Roomie {
 }
 
 namespace RR::Methods::Referee {
-    // Injector bootstrap slot/instruction and diagnostic fault sites. Use the
+    // Referee bootstrap slot/instruction and diagnostic fault sites. Use the
     // Referee base, never the GameAssembly base or another client's address table.
     inline constexpr uintptr_t ArenaSlot = 0x6C10858;
     inline constexpr uintptr_t BootstrapInstruction = 0x69839D;

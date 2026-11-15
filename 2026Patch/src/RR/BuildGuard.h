@@ -11,7 +11,7 @@ namespace RR::BuildGuard {
         const char* hash;
     };
 
-    // The loaded DLL and injector use the same exact three-module boundary.
+    // The loaded DLL and the proxy loader use the same exact three-module boundary.
     // Version labels alone cannot authorize RVAs; even one changed module must
     // fail closed. Adding a client requires re-deriving addresses and layouts.
     inline constexpr ModuleFingerprint SupportedModules[] = {
@@ -137,7 +137,7 @@ namespace RR::BuildGuard {
         return true;
     }
 
-    // Read-only preflight: hash files without loading game DLLs into the injector.
+    // Read-only preflight: hash files without loading game DLLs into the process.
     // The DLL repeats verification after load; this check is not hook readiness.
     inline bool SupportsInstallation(const std::wstring& root) {
         for (const auto& module : SupportedModules) {

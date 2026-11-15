@@ -32,7 +32,6 @@ jobs:
           if-no-files-found: error
           path: |
             x64/Release/2026patch.dll
-            x64/Release/Injector.exe
             x64/Release/PreserveLoader.dll
             x64/Release/2026patch.ini
             x64/Release/RecRoomScreen.bat
@@ -57,7 +56,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          Compress-Archive -Path dist\2026patch.dll, dist\Injector.exe, dist\PreserveLoader.dll, `
+          Compress-Archive -Path dist\2026patch.dll, dist\PreserveLoader.dll, `
             dist\2026patch.ini, `
             dist\RecRoomScreen.bat, dist\RecRoomVR.bat, `
             dist\Install-PreserveLoader.bat, dist\RecRoomPreserve.bat, `

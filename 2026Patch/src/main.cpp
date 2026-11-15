@@ -26,7 +26,7 @@ static DWORD WINAPI InitializePatch(void* parameter) {
     PatchLogging::BeginSession(directory + L"\\2026patch.log");
 
     // Configuration precedes all hook creation, so the first intercepted request
-    // sees the same settings as injector preflight. Blank routing fields retain
+    // sees the same settings as a command-line preflight. Blank routing fields retain
     // client endpoints; malformed supplied values abort this worker with no hooks.
     //
     // The configuration is looked for next to the DLL first, then next to the
@@ -59,7 +59,7 @@ static DWORD WINAPI InitializePatch(void* parameter) {
     PatchLogging::verboseLogging = settings.verbose;
     PatchLogging::Log("[Build] Native 20260323.14 patch");
 
-    // Injector preflight checks files in its target installation. Repeat the
+    // The loader install hashes the same files. Repeat the
     // check against the modules loaded by THIS process before resolving any RVA:
     // a manual DLL load must not bypass the version boundary.
     if (!RR::BuildGuard::SupportsLoadedClient()) {

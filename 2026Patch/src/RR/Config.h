@@ -101,7 +101,7 @@ namespace RR::Config {
             return false;
         }
         // The developer launcher override is process-local and applied after the
-        // INI. Both injector and client inherit it, so preflight sees exactly
+        // INI. The loader and the client both inherit it, so preflight sees exactly
         // the same key as the DLL. A public-key file path is never logged.
         wchar_t keyPath[32768]{};
         const DWORD keyLength = GetEnvironmentVariableW(L"PATCH26_TACHYON_PUBLIC_KEY", keyPath, 32768);
