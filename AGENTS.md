@@ -151,6 +151,82 @@ its actual owning module, then applies the function's relative offset to that
 module in the target process. An injector-local absolute pointer is not a remote
 address contract. Module presence after loading still says nothing about hook readiness.
 
+## Preservation proxy loader and the arena seam
+
+`PreserveProxy/` builds `PreserveLoader.dll`, which the client loads in place of
+`Referee.dll` so the patch can be attached without the standalone injector. The
+loader exports `jjiEVn` and forwards it to the real protector, which it loads
+from `preserve\Referee.dll`. `preserve\modules\*.dll` is the module folder: the
+loader attaches every DLL in it once `GameAssembly.dll` appears, which is how
+`2026patch.dll` is loaded. Nothing in the patch DLL depends on this loader.
+
+The protector must be the file the client build actually shipped. The
+20260323.14 protector exports `jjiEVn` and hashes to
+`5868C90A7C67757F3B678AA356CBD933D646C9749E0ACAA31B7DCC9EAEE12EAD`; a
+different protector with a different export name leaves the client's import
+unbound and the loader has nothing to forward to.
+
+### The arena has to be published before the protector's first read
+
+The protector keeps its arena pointer in a local variable and stores the
+ADDRESS of that local in the slot at `Referee+0x6C10858`. It then reads that
+local, and every arena address it derives afterwards is `base + offset`. The
+retired service used to supply that arena; the injector builds a synthetic one
+and writes it into the protector's own stack frame, between the store and the
+read. Get this wrong and the protector derives thousands of offsets from a null
+base, caches them in its own data, and the client never reaches a consistent
+state. The symptom is endless low-address access violations inside the
+protector, not a clean failure.
+
+The proxy cannot race the protector from another thread: the loader lock keeps a
+second thread from starting until the protector's `DllMain` has returned, which
+is after the protector has already read the null arena. The window is closed
+with a hardware write watchpoint on the slot instead.
+
+- `Dr0` points at `Referee+0x6C10858` and `Dr7` enables a local eight-byte
+  write watchpoint. Every other thread in the process must have `Dr7` cleared
+  first, or the CPU rejects the change.
+- The protector's `DllMain` runs on the thread that calls `LoadLibrary`, so the
+  watchpoint fires there, after the store and before the protector's next
+  instruction reads the local. The slot then holds the address of the local, and
+  the arena can be written straight into it.
+- The data address of a debug register exception is reported in `Dr6`, not in
+  the exception record. `Dr6` bit 0 means breakpoint 0 fired. Reading
+  `ExceptionInformation[1]` instead leaves the exception unhandled, and an
+  unhandled exception inside `DllMain` surfaces as `ERROR_DLL_INIT_FAILED`
+  (0xc0000142), which looks like the protector refusing to load.
+- Disarm the watchpoint once it has fired; leaving it armed turns every later
+  write to that page into an exception.
+
+A vectored exception handler remains as a backstop for a read that happens
+before the watchpoint is armed, and to repair late access violations. Two
+things it must not do: format strings or touch the file system. A fault inside
+either ends the process, which is how a diagnostic turns into the crash it was
+diagnosing. The handler therefore copies the fault context into a fixed ring
+buffer, and an ordinary worker thread drains that buffer to the log. That worker
+also reinstalls the handlers periodically, because the protector removes
+vectored handlers it finds while it unpacks.
+
+The synthetic arena is the injector's: 64 MiB, three channel descriptors at
+stride `0x1500030`, each with queues at `+0xA0` and `+0x100040` and lengths
+`0x80000` and `0x1000000`. Its capacity is `(length - 0x1C) / 2`; a zero length
+underflows and produces invalid second-buffer pointers and later access
+violations at `0x62BB0B`/`0x216D035`.
+
+Repairing a stale pointer in a register is not enough on its own. The protector
+keeps its own copies of the stale offsets in its heap and re-reads them, so the
+copies have to be rewritten too. That repair is only safe inside the
+protector's pointer table: a quadword equal to an arena offset can occur
+anywhere in the game's heap, and rewriting one of those corrupts the game
+(0xc0000374). A candidate is therefore only rewritten when a neighbour within
+64 bytes is another stale offset, which is what that table looks like.
+
+The `jjiEVn` trampoline must preserve the machine state around the call it
+makes to resolve the gate. The client passes its arguments straight through to
+the protector, and a plain C call destroys the volatile argument registers
+(`rax`, `rcx`, `rdx`, `r8`-`r11`) and may touch `xmm0`-`xmm5`. Forwarding the
+arguments unchanged is not optional.
+
 ## Calling IL2CPP and installing hooks
 
 Unity's API table is at `0x1E9D890`. Initialization waits at most five seconds for

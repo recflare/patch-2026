@@ -1,0 +1,8 @@
+; PreserveLoader.dll exports:
+;   jjiEVn              -- the protector gate, implemented natively by the trampoline
+;   GetPreserveProtector -- returns the real protector's load base for the patch
+;   LazyInitGate        -- called by the trampoline to run Themida's entry point exactly once
+EXPORTS
+    jjiEVn
+    GetPreserveProtector
+    EnsureGate
